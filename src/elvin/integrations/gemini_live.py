@@ -307,6 +307,12 @@ class GeminiLiveSession:
 
         model_turn = getattr(content, "model_turn", None)
         parts = getattr(model_turn, "parts", None) if model_turn else None
+        if not is_pending_previous and (
+            input_transcription is not None
+            or output_transcription is not None
+            or model_turn is not None
+        ):
+            self._response_open_generation = generation
         if parts:
             for part in parts:
                 inline_data = getattr(part, "inline_data", None)
