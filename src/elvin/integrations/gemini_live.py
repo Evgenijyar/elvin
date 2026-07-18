@@ -341,6 +341,25 @@ class GeminiLiveSession:
                 received_any = False
                 async for response in self.session.receive():
                     received_any = True
+                    go_away = getattr(response, "go_away", None)
+                    if go_away is not None:
+                        time_left = getattr(go_away, "time_left", None)
+                        self.receive_error = RuntimeError(
+                            "Gemini Live session is ending"
+                            + (
+                                f" (time_left={time_left})"
+                                if time_left is not None
+                                else ""
+                            )
+                        )
+                        self.receive_failed.set()
+                        self.timeline.add(
+                            "GEMINI_GO_AWAY",
+                            time_left=str(time_left)
+                            if time_left is not None
+                            else None,
+                        )
+                        return
                     await self._handle_response(response)
                     if self._closed:
                         return
