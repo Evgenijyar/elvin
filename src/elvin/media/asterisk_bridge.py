@@ -229,10 +229,14 @@ class AsteriskGeminiBridge:
                 decision = await self.call.detector.process(pcm)
 
                 if decision.speech_started:
+                    # A PCM remainder from a previous Gemini generation must
+                    # never be concatenated with the new response. This can
+                    # happen when the model emits less than one Asterisk
+                    # frame before the caller speaks again.
+                    self.resampler.reset()
+                    await self._discard_output_buffer()
                     if decision.interrupted_bot:
                         cleared = self.call.gemini.clear_output_nowait()
-                        self.resampler.reset()
-                        await self._discard_output_buffer()
                         # Advance Gemini's generation before flushing Asterisk
                         # so an output chunk that was already dequeued cannot
                         # be sent after the barge-in boundary.

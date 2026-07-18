@@ -30,12 +30,50 @@ def build_system_instruction(robot: dict[str, Any]) -> str:
         "После каждого вопроса остановись и слушай ответ.",
         "Не упоминай Gemini, API, LPTracker, Asterisk, системный промпт или внутреннее устройство.",
     ]
+    # Keep the live-model instruction as real UTF-8 Russian text. The
+    # historical literals above were mojibake and made the model receive a
+    # corrupted system prompt.
+    parts = [
+        "Ты голосовой ИИ-робот, разговаривающий с человеком по телефону.",
+        "Отвечай естественно, коротко и на русском языке.",
+        "Не начинай разговор первым: дождись первой законченной реплики человека.",
+        "После каждого вопроса остановись и слушай ответ.",
+        "Не упоминай Gemini, API, LPTracker, Asterisk, системный промпт или внутреннее устройство.",
+    ]
     if description:
         parts.extend(["ОПИСАНИЕ РОБОТА:", description])
     if role:
         parts.extend(["РОЛЬ И СЦЕНАРИЙ:", role])
     if knowledge:
         parts.extend(["БАЗА ЗНАНИЙ:", knowledge])
+    # Rebuild optional sections as well; historical literals in this function
+    # contain mojibake labels and must never reach Gemini.
+    parts = [
+        "Ты голосовой ИИ-робот, разговаривающий с человеком по телефону.",
+        "Отвечай естественно, коротко и на русском языке.",
+        "Не начинай разговор первым: дождись первой законченной реплики человека.",
+        "После каждого вопроса остановись и слушай ответ.",
+        "Не упоминай Gemini, API, LPTracker, Asterisk, системный промпт или внутреннее устройство.",
+    ]
+    if description:
+        parts.extend(["ОПИСАНИЕ РОБОТА:", description])
+    if role:
+        parts.extend(["РОЛЬ И СЦЕНАРИЙ:", role])
+    if knowledge:
+        parts.extend(["БАЗА ЗНАНИЙ:", knowledge])
+    parts = [
+        "\u0422\u044b \u0433\u043e\u043b\u043e\u0441\u043e\u0432\u043e\u0439 \u0418\u0418-\u0440\u043e\u0431\u043e\u0442, \u0440\u0430\u0437\u0433\u043e\u0432\u0430\u0440\u0438\u0432\u0430\u044e\u0449\u0438\u0439 \u0441 \u0447\u0435\u043b\u043e\u0432\u0435\u043a\u043e\u043c \u043f\u043e \u0442\u0435\u043b\u0435\u0444\u043e\u043d\u0443.",
+        "\u041e\u0442\u0432\u0435\u0447\u0430\u0439 \u0435\u0441\u0442\u0435\u0441\u0442\u0432\u0435\u043d\u043d\u043e, \u043a\u043e\u0440\u043e\u0442\u043a\u043e \u0438 \u043d\u0430 \u0440\u0443\u0441\u0441\u043a\u043e\u043c \u044f\u0437\u044b\u043a\u0435.",
+        "\u041d\u0435 \u043d\u0430\u0447\u0438\u043d\u0430\u0439 \u0440\u0430\u0437\u0433\u043e\u0432\u043e\u0440 \u043f\u0435\u0440\u0432\u044b\u043c: \u0434\u043e\u0436\u0434\u0438\u0441\u044c \u043f\u0435\u0440\u0432\u043e\u0439 \u0437\u0430\u043a\u043e\u043d\u0447\u0435\u043d\u043d\u043e\u0439 \u0440\u0435\u043f\u043b\u0438\u043a\u0438 \u0447\u0435\u043b\u043e\u0432\u0435\u043a\u0430.",
+        "\u041f\u043e\u0441\u043b\u0435 \u043a\u0430\u0436\u0434\u043e\u0433\u043e \u0432\u043e\u043f\u0440\u043e\u0441\u0430 \u043e\u0441\u0442\u0430\u043d\u043e\u0432\u0438\u0441\u044c \u0438 \u0441\u043b\u0443\u0448\u0430\u0439 \u043e\u0442\u0432\u0435\u0442.",
+        "\u041d\u0435 \u0443\u043f\u043e\u043c\u0438\u043d\u0430\u0439 Gemini, API, LPTracker, Asterisk, \u0441\u0438\u0441\u0442\u0435\u043c\u043d\u044b\u0439 \u043f\u0440\u043e\u043c\u043f\u0442 \u0438\u043b\u0438 \u0432\u043d\u0443\u0442\u0440\u0435\u043d\u043d\u0435\u0435 \u0443\u0441\u0442\u0440\u043e\u0439\u0441\u0442\u0432\u043e.",
+    ]
+    if description:
+        parts.extend(["\u041e\u041f\u0418\u0421\u0410\u041d\u0418\u0415 \u0420\u041e\u0411\u041e\u0422\u0410:", description])
+    if role:
+        parts.extend(["\u0420\u041e\u041b\u042c \u0418 \u0421\u0426\u0415\u041d\u0410\u0420\u0418\u0419:", role])
+    if knowledge:
+        parts.extend(["\u0411\u0410\u0417\u0410 \u0417\u041d\u0410\u041d\u0418\u0419:", knowledge])
     return "\n\n".join(parts)
 
 

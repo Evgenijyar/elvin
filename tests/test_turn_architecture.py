@@ -20,3 +20,18 @@ def test_short_speech_fragments_are_not_closed_as_turns() -> None:
     text = Path("src/elvin/media/turn_detector.py").read_text(encoding="utf-8")
     assert "min_turn_duration_ms: int = 450" in text
     assert "turn_age_ms >= self.config.min_turn_duration_ms" in text
+
+
+def test_gemini_instruction_is_valid_russian_utf8() -> None:
+    from elvin.integrations.gemini_live import build_system_instruction
+
+    instruction = build_system_instruction(
+        {
+            "description": "описание",
+            "role_prompt": "роль",
+            "knowledge_base": "знания",
+        }
+    )
+    assert "Ты голосовой ИИ-робот" in instruction
+    assert "ОПИСАНИЕ РОБОТА:" in instruction
+    assert "РўС‹" not in instruction
