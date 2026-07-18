@@ -38,6 +38,8 @@ class TurnDetectorConfig:
     # pause between words, and immediately opening another activity causes
     # Gemini to cancel the pending response before it has produced audio.
     min_turn_duration_ms: int = 450
+    # Give short hesitations a chance to merge into the current activity.
+    turn_merge_grace_ms: int = 600
     force_end_silence_ms: int = 1_400
     level_log_interval_seconds: float = 1.0
 
@@ -49,6 +51,7 @@ class TurnDecision:
     speech_started: bool = False
     speech_ended: bool = False
     interrupted_bot: bool = False
+    echo_suppressed: bool = False
     vad_state: str = "QUIET"
     smart_turn_state: str | None = None
     levels: dict[str, float] | None = None
@@ -115,33 +118,45 @@ class LocalTurnDetector:
         self.turn_started_at: float | None = None
         self.silence_started_at: float | None = None
         self.last_smart_turn_check = 0.0
+        self.turn_complete_candidate_at: float | None = None
 
     def set_bot_speaking(self, value: bool) -> None:
         self.bot_speaking = value
 
-    async def process(self, pcm: bytes) -> TurnDecision:
+    async def process(
+        self,
+        pcm: bytes,
+        *,
+        echo_suppressed: bool = False,
+    ) -> TurnDecision:
         self.sequence += 1
         now = time.monotonic()
-        self.pre_roll.append(pcm)
+        # Keep diagnostics on the original input but do not let a highly
+        # correlated playback echo open a local turn.
+        analysis_pcm = b"\x00" * len(pcm) if echo_suppressed else pcm
+        self.pre_roll.append(analysis_pcm)
         levels = measure_pcm16(pcm)
 
-        vad_state = await self.vad.analyze_audio(pcm)
+        vad_state = await self.vad.analyze_audio(analysis_pcm)
         speech_likely = vad_state in {
             self.VADState.STARTING,
             self.VADState.SPEAKING,
         }
-        noise_dbfs = self.noise.update(
-            levels.dbfs, speech_likely=speech_likely
+        noise_dbfs = (
+            self.noise.dbfs
+            if echo_suppressed
+            else self.noise.update(levels.dbfs, speech_likely=speech_likely)
         )
         snr_db = levels.dbfs - noise_dbfs
 
         smart_append_state = self.smart_turn.append_audio(
-            pcm,
+            analysis_pcm,
             is_speech=speech_likely,
         )
 
         decision = TurnDecision(
             frame_sequence=self.sequence,
+            echo_suppressed=echo_suppressed,
             vad_state=vad_state.name,
             levels={
                 "rms": levels.rms,
@@ -153,20 +168,13 @@ class LocalTurnDetector:
         )
 
         # The start event is emitted only after Silero has accumulated enough
-        # evidence.  The pre-roll then restores the audio that preceded the
-        # decision, including the first consonant/syllable.
-        # The Asterisk websocket leg does not provide acoustic echo
-        # cancellation. While the bot is being played, its own far-end audio
-        # can arrive back on the caller leg and Silero will classify it as
-        # speech. Opening a new Gemini activity in that window cuts the
-        # response mid-sentence. Keep the detector half-duplex until the
-        # playback marker turns bot_speaking off.
-        if not self.turn_open and self.bot_speaking and speech_likely:
-            self.smart_turn.clear()
-        elif not self.turn_open and vad_state == self.VADState.SPEAKING:
+        # evidence. PlaybackEchoGuard removes only high-confidence far-end
+        # audio, so genuine caller speech can always interrupt the bot.
+        if not self.turn_open and vad_state == self.VADState.SPEAKING:
             self.turn_open = True
             self.turn_started_at = now
             self.silence_started_at = None
+            self.turn_complete_candidate_at = None
             decision.speech_started = True
             decision.interrupted_bot = self.bot_speaking
             decision.audio_to_gemini = self.pre_roll.snapshot()
@@ -182,7 +190,7 @@ class LocalTurnDetector:
         elif self.turn_open:
             # Once a turn is open, preserve the continuous segment, including
             # short quiet frames.  Do not gate each 20ms fragment by volume.
-            decision.audio_to_gemini = pcm
+            decision.audio_to_gemini = analysis_pcm if echo_suppressed else pcm
 
         if self.turn_open:
             if vad_state in {
@@ -190,6 +198,7 @@ class LocalTurnDetector:
                 self.VADState.SPEAKING,
             }:
                 self.silence_started_at = None
+                self.turn_complete_candidate_at = None
             elif self.silence_started_at is None:
                 self.silence_started_at = now
 
@@ -216,8 +225,14 @@ class LocalTurnDetector:
                 smart_append_state == self.EndOfTurnState.COMPLETE
                 and turn_age_ms >= self.config.min_turn_duration_ms
             ):
-                decision.smart_turn_state = "TIMEOUT_COMPLETE"
-                self._close_turn(decision, reason="smart_turn_timeout")
+                if self.turn_complete_candidate_at is None:
+                    self.turn_complete_candidate_at = now
+                    decision.smart_turn_state = "CANDIDATE_COMPLETE"
+                elif (
+                    now - self.turn_complete_candidate_at
+                ) * 1000 >= self.config.turn_merge_grace_ms:
+                    decision.smart_turn_state = "TIMEOUT_COMPLETE"
+                    self._close_turn(decision, reason="smart_turn_timeout")
             elif should_check:
                 self.last_smart_turn_check = now
                 state, metrics = await self.smart_turn.analyze_end_of_turn()
@@ -242,7 +257,13 @@ class LocalTurnDetector:
                     state == self.EndOfTurnState.COMPLETE
                     and turn_age_ms >= self.config.min_turn_duration_ms
                 ):
-                    self._close_turn(decision, reason="smart_turn_complete")
+                    if self.turn_complete_candidate_at is None:
+                        self.turn_complete_candidate_at = now
+                        decision.smart_turn_state = "CANDIDATE_COMPLETE"
+                    elif (
+                        now - self.turn_complete_candidate_at
+                    ) * 1000 >= self.config.turn_merge_grace_ms:
+                        self._close_turn(decision, reason="smart_turn_complete")
                 elif self.silence_started_at is not None:
                     silence_ms = (now - self.silence_started_at) * 1000
                     if silence_ms >= self.config.force_end_silence_ms:
@@ -288,6 +309,7 @@ class LocalTurnDetector:
                 "forwarded": bool(decision.audio_to_gemini),
                 "speech_started": decision.speech_started,
                 "speech_ended": decision.speech_ended,
+                "echo_suppressed": decision.echo_suppressed,
                 "smart_turn": decision.smart_turn_state,
             }
         )
@@ -313,6 +335,7 @@ class LocalTurnDetector:
         self.silence_started_at = None
         self.turn_started_at = None
         self.last_smart_turn_check = 0.0
+        self.turn_complete_candidate_at = None
 
     async def close(self) -> None:
         await self.vad.cleanup()

@@ -11,7 +11,7 @@ from typing import Any
 from fastapi import WebSocket
 from starlette.websockets import WebSocketDisconnect
 
-from elvin.media.audio import Pcm24To16Resampler
+from elvin.media.audio import Pcm24To16Resampler, PlaybackEchoGuard
 from elvin.media.runtime import PreparedVoiceCall
 
 logger = logging.getLogger("elvin.asterisk")
@@ -137,6 +137,11 @@ class AsteriskGeminiBridge:
         self.call = call
         self.protocol = AsteriskProtocol(websocket, call)
         self.resampler = Pcm24To16Resampler()
+        # chan_websocket does not perform acoustic echo cancellation. Keep a
+        # short copy of playback submitted to Asterisk so the local VAD can
+        # suppress only high-confidence far-end echo while preserving true
+        # caller barge-in.
+        self.echo_guard = PlaybackEchoGuard()
         self._closed = False
         self._first_input = True
         self._first_output_generation: set[int] = set()
@@ -146,6 +151,7 @@ class AsteriskGeminiBridge:
         # between packets and flush it with silence at turn end.
         self._output_buffer = bytearray()
         self._output_buffer_lock = asyncio.Lock()
+        self._last_echo_event_at = 0.0
 
     async def run(self) -> str:
         self.call.media_attached = True
@@ -212,6 +218,9 @@ class AsteriskGeminiBridge:
                             self.protocol.info.optimal_frame_size,
                             self.protocol.info.ptime,
                         )
+                        self.echo_guard.frame_bytes = max(
+                            2, self.protocol.info.optimal_frame_size
+                        )
                     elif event_name in {"HANGUP", "MEDIA_END"}:
                         return "asterisk_hangup"
                     continue
@@ -226,7 +235,30 @@ class AsteriskGeminiBridge:
                         bytes=len(pcm),
                     )
                 self.call.caller_audio.submit(pcm)
-                decision = await self.call.detector.process(pcm)
+                echo_suppressed = self.echo_guard.is_echo(
+                    pcm,
+                    active=(
+                        self.call.detector.bot_speaking
+                        and not self.call.detector.turn_open
+                    ),
+                )
+                if (
+                    echo_suppressed
+                    and asyncio.get_running_loop().time()
+                    - self._last_echo_event_at
+                    >= 0.25
+                ):
+                    self._last_echo_event_at = (
+                        asyncio.get_running_loop().time()
+                    )
+                    self.call.timeline.add(
+                        "PLAYBACK_ECHO_SUPPRESSED",
+                        bytes=len(pcm),
+                    )
+                decision = await self.call.detector.process(
+                    pcm,
+                    echo_suppressed=echo_suppressed,
+                )
 
                 if decision.speech_started:
                     # A PCM remainder from a previous Gemini generation must
@@ -242,6 +274,7 @@ class AsteriskGeminiBridge:
                         # be sent after the barge-in boundary.
                         await self.call.gemini.start_activity()
                         await self.protocol.command("FLUSH_MEDIA")
+                        self.echo_guard.clear()
                         self.call.detector.set_bot_speaking(False)
                         self.call.timeline.add(
                             "BARGE_IN_FLUSH",
@@ -338,6 +371,9 @@ class AsteriskGeminiBridge:
                 )
             self.call.bot_audio.submit(chunk)
         await self.protocol.send_media(chunk)
+        echo_guard = getattr(self, "echo_guard", None)
+        if echo_guard is not None:
+            echo_guard.note_playback(chunk)
 
     async def _discard_output_buffer(self) -> None:
         async with self._output_buffer_lock:

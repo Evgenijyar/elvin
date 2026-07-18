@@ -199,6 +199,143 @@ class Pcm24To16Resampler:
         self._position = 0.0
 
 
+class PlaybackEchoGuard:
+    """Identify far-end playback leaking into the caller leg.
+
+    ``chan_websocket`` is a media transport, not an acoustic echo canceller.
+    Depending on the SIP endpoint and bridge topology, a portion of the audio
+    sent to Asterisk can arrive back on the input leg a few frames later.  A
+    plain VAD cannot distinguish that echo from a person speaking, so it can
+    open a new activity and cut a perfectly valid model response.
+
+    This is deliberately a conservative *gate*, not a noise suppressor.  It
+    only suppresses a frame while playback is active when the frame has a
+    strong normalized correlation with recently submitted bot audio.  A
+    genuine caller utterance is forwarded unchanged and can therefore barge
+    in.  The calculation uses a decimated signal to keep the 20 ms media loop
+    inexpensive and tolerates a small sample offset introduced by codecs.
+    """
+
+    def __init__(
+        self,
+        *,
+        sample_rate: int = TELEPHONY_SAMPLE_RATE,
+        frame_ms: int = DEFAULT_PTIME_MS,
+        history_ms: int = 1_200,
+        correlation_threshold: float = 0.78,
+        min_input_rms: float = 0.008,
+        min_playback_rms: float = 0.004,
+    ) -> None:
+        self.frame_bytes = max(
+            SAMPLE_WIDTH_BYTES,
+            int(sample_rate * frame_ms / 1000) * SAMPLE_WIDTH_BYTES,
+        )
+        self.max_frames = max(1, int(history_ms / max(1, frame_ms)))
+        self.correlation_threshold = correlation_threshold
+        self.min_input_rms = min_input_rms
+        self.min_playback_rms = min_playback_rms
+        self._frames: deque[bytes] = deque(maxlen=self.max_frames)
+
+    def note_playback(self, pcm16: bytes) -> None:
+        """Remember audio submitted to Asterisk, split into media frames."""
+        if not pcm16:
+            return
+        usable = len(pcm16) - (len(pcm16) % SAMPLE_WIDTH_BYTES)
+        for offset in range(0, usable, self.frame_bytes):
+            frame = pcm16[offset : offset + self.frame_bytes]
+            if len(frame) == self.frame_bytes:
+                self._frames.append(frame)
+
+    def clear(self) -> None:
+        self._frames.clear()
+
+    def is_echo(self, pcm16: bytes, *, active: bool) -> bool:
+        """Return ``True`` only for a high-confidence playback echo frame."""
+        if not active or len(pcm16) < SAMPLE_WIDTH_BYTES * 32:
+            return False
+        current = _pcm16_samples(pcm16)
+        if not current:
+            return False
+        input_rms = _samples_rms(current)
+        if input_rms < self.min_input_rms:
+            return False
+
+        # The incoming frame can be one or two samples shorter/longer than the
+        # nominal frame at a transport boundary. Compare only equal windows.
+        decimation = 8
+        current_decimated = current[::decimation]
+        if len(current_decimated) < 16:
+            return False
+
+        for reference_bytes in reversed(self._frames):
+            reference = _pcm16_samples(reference_bytes)
+            playback_rms = _samples_rms(reference)
+            if playback_rms < self.min_playback_rms:
+                continue
+            reference_decimated = reference[::decimation]
+            score = _max_normalized_correlation(
+                current_decimated,
+                reference_decimated,
+                max_shift=4,
+            )
+            if score >= self.correlation_threshold:
+                return True
+        return False
+
+
+def _pcm16_samples(pcm: bytes) -> list[float]:
+    usable = pcm[: len(pcm) - (len(pcm) % SAMPLE_WIDTH_BYTES)]
+    samples = array("h")
+    samples.frombytes(usable)
+    if sys.byteorder != "little":
+        samples.byteswap()
+    return [float(value) / 32768.0 for value in samples]
+
+
+def _samples_rms(samples: list[float]) -> float:
+    if not samples:
+        return 0.0
+    return math.sqrt(sum(value * value for value in samples) / len(samples))
+
+
+def _max_normalized_correlation(
+    left: list[float],
+    right: list[float],
+    *,
+    max_shift: int,
+) -> float:
+    """Maximum zero-mean correlation for small integer sample offsets."""
+    best = 0.0
+    for shift in range(-max_shift, max_shift + 1):
+        if shift < 0:
+            a = left[-shift:]
+            b = right[: len(a)]
+        elif shift > 0:
+            b = right[shift:]
+            a = left[: len(b)]
+        else:
+            a = left
+            b = right
+        size = min(len(a), len(b))
+        if size < 16:
+            continue
+        a = a[:size]
+        b = b[:size]
+        mean_a = sum(a) / size
+        mean_b = sum(b) / size
+        aa = [value - mean_a for value in a]
+        bb = [value - mean_b for value in b]
+        energy_a = sum(value * value for value in aa)
+        energy_b = sum(value * value for value in bb)
+        if energy_a <= 1e-9 or energy_b <= 1e-9:
+            continue
+        correlation = sum(x * y for x, y in zip(aa, bb)) / math.sqrt(
+            energy_a * energy_b
+        )
+        best = max(best, abs(correlation))
+    return best
+
+
 class AsyncWaveWriter:
     """Background WAV writer with a bounded, non-blocking media-side API."""
 
