@@ -64,7 +64,12 @@ async def asterisk_media(websocket: WebSocket) -> None:
         if not _voice_runtime_available():
             raise RuntimeError("Voice runtime отсутствует в Docker-образе.")
 
-        context = await queue.claim_media_session(timeout=8.0)
+        # LPTracker and SIP setup can legitimately take more than a few
+        # seconds. Keep the websocket open while the queue is waiting instead
+        # of rejecting a valid Asterisk connection during normal call setup.
+        context = await queue.claim_media_session(
+            timeout=min(queue.media_connect_timeout_seconds, 60.0)
+        )
 
         async def terminate_socket() -> None:
             if websocket.application_state != WebSocketState.DISCONNECTED:

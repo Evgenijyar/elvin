@@ -140,6 +140,12 @@ class AsteriskGeminiBridge:
         self._closed = False
         self._first_input = True
         self._first_output_generation: set[int] = set()
+        # chan_websocket re-times media most reliably when every binary frame
+        # is an exact multiple of MEDIA_START.optimal_frame_size. Gemini
+        # packets are arbitrary chunks, so retain only the small remainder
+        # between packets and flush it with silence at turn end.
+        self._output_buffer = bytearray()
+        self._output_buffer_lock = asyncio.Lock()
 
     async def run(self) -> str:
         self.call.media_attached = True
@@ -182,7 +188,6 @@ class AsteriskGeminiBridge:
             self.call.timeline.add("ASTERISK_BRIDGE_CLOSED", result=result)
 
     async def _input_loop(self) -> str:
-        buffering_enabled = False
         try:
             while True:
                 message = await self.websocket.receive()
@@ -194,23 +199,21 @@ class AsteriskGeminiBridge:
                 if text is not None:
                     event = self.protocol.parse_text(text)
                     self.protocol.handle_event(event)
-                    if (
-                        str(event.get("event")) == "MEDIA_START"
-                        and not buffering_enabled
-                    ):
+                    event_name = str(event.get("event") or event.get("type") or "")
+                    if event_name == "MEDIA_START":
                         if self.protocol.info.format != "slin16":
                             raise RuntimeError(
                                 "Asterisk media format must be slin16; got "
                                 f"{self.protocol.info.format}"
                             )
-                        await self.protocol.command("START_MEDIA_BUFFERING")
-                        buffering_enabled = True
                         logger.warning(
                             "Asterisk PCM input started: sample_rate=16000 "
                             "channels=1 frame_bytes=%s ptime=%sms",
                             self.protocol.info.optimal_frame_size,
                             self.protocol.info.ptime,
                         )
+                    elif event_name in {"HANGUP", "MEDIA_END"}:
+                        return "asterisk_hangup"
                     continue
 
                 pcm = message.get("bytes")
@@ -228,14 +231,20 @@ class AsteriskGeminiBridge:
                 if decision.speech_started:
                     if decision.interrupted_bot:
                         cleared = self.call.gemini.clear_output_nowait()
-                        await self.protocol.command("FLUSH_MEDIA")
                         self.resampler.reset()
+                        await self._discard_output_buffer()
+                        # Advance Gemini's generation before flushing Asterisk
+                        # so an output chunk that was already dequeued cannot
+                        # be sent after the barge-in boundary.
+                        await self.call.gemini.start_activity()
+                        await self.protocol.command("FLUSH_MEDIA")
                         self.call.detector.set_bot_speaking(False)
                         self.call.timeline.add(
                             "BARGE_IN_FLUSH",
                             cleared_gemini_packets=cleared,
                         )
-                    await self.call.gemini.start_activity()
+                    else:
+                        await self.call.gemini.start_activity()
 
                 if decision.audio_to_gemini:
                     await self.call.gemini.send_audio(
@@ -249,7 +258,29 @@ class AsteriskGeminiBridge:
 
     async def _output_loop(self) -> None:
         while True:
-            packet = await self.call.gemini.output_audio.get()
+            queue_task = asyncio.create_task(self.call.gemini.output_audio.get())
+            failure_task = asyncio.create_task(self.call.gemini.receive_failed.wait())
+            done, pending = await asyncio.wait(
+                {queue_task, failure_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            if queue_task in done:
+                packet = queue_task.result()
+            else:
+                queue_task.cancel()
+                await asyncio.gather(queue_task, return_exceptions=True)
+                error = self.call.gemini.receive_error
+                raise RuntimeError(
+                    "Gemini Live receiver stopped"
+                    + (
+                        f": {type(error).__name__}: {error}"
+                        if error is not None
+                        else ""
+                    )
+                ) from error
             try:
                 # Once a new user activity starts, old queued model audio must
                 # not leak into the next turn even if it races with the server.
@@ -258,24 +289,61 @@ class AsteriskGeminiBridge:
                 pcm16 = self.resampler.convert(packet.pcm24)
                 if not pcm16:
                     continue
-                if packet.generation not in self._first_output_generation:
-                    self._first_output_generation.add(packet.generation)
-                    self.call.detector.set_bot_speaking(True)
-                    self.call.timeline.add(
-                        "ASTERISK_FIRST_AUDIO_SENT",
-                        generation=packet.generation,
-                        bytes=len(pcm16),
-                    )
-                self.call.bot_audio.submit(pcm16)
-                await self.protocol.send_media(pcm16)
+                await self._send_output_audio(
+                    pcm16,
+                    generation=packet.generation,
+                )
             finally:
                 self.call.gemini.output_audio.task_done()
+
+    async def _send_output_audio(
+        self,
+        pcm16: bytes,
+        *,
+        generation: int | None = None,
+        flush: bool = False,
+    ) -> None:
+        if generation is not None and generation != self.call.gemini.generation:
+            return
+        async with self._output_buffer_lock:
+            if generation is not None and generation != self.call.gemini.generation:
+                return
+            self._output_buffer.extend(pcm16)
+            frame_size = max(2, int(self.protocol.info.optimal_frame_size or 640))
+            frame_size -= frame_size % 2
+            send_size = len(self._output_buffer) - (
+                len(self._output_buffer) % frame_size
+            )
+            if flush and self._output_buffer:
+                send_size = len(self._output_buffer)
+                remainder = send_size % frame_size
+                if remainder:
+                    self._output_buffer.extend(b"\x00" * (frame_size - remainder))
+                    send_size = len(self._output_buffer)
+            if send_size <= 0:
+                return
+            chunk = bytes(self._output_buffer[:send_size])
+            del self._output_buffer[:send_size]
+            self.call.detector.set_bot_speaking(True)
+            if self.call.gemini.generation not in self._first_output_generation:
+                self._first_output_generation.add(self.call.gemini.generation)
+                self.call.timeline.add(
+                    "ASTERISK_FIRST_AUDIO_SENT",
+                    generation=self.call.gemini.generation,
+                    bytes=len(chunk),
+                )
+            self.call.bot_audio.submit(chunk)
+        await self.protocol.send_media(chunk)
+
+    async def _discard_output_buffer(self) -> None:
+        async with self._output_buffer_lock:
+            self._output_buffer.clear()
 
     async def _playback_monitor(self) -> None:
         handled_generation = -1
         while True:
             await self.call.gemini.turn_complete.wait()
-            generation = self.call.gemini.generation
+            generation = self.call.gemini.turn_complete_generation
             self.call.gemini.turn_complete.clear()
             if generation == handled_generation:
                 continue
@@ -284,6 +352,7 @@ class AsteriskGeminiBridge:
             # Wait until all Gemini packets already received have been handed
             # to Asterisk, then place a marker behind them in Asterisk's queue.
             await self.call.gemini.output_audio.join()
+            await self._send_output_audio(b"", generation=generation, flush=True)
             correlation_id = f"elvin-{generation}"
             try:
                 waiter = await self.protocol.mark(correlation_id)

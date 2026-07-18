@@ -71,7 +71,13 @@ class GeminiLiveSession:
         self.output_audio: asyncio.Queue[GeminiAudioPacket] = asyncio.Queue(
             maxsize=400
         )
+        # A receiver failure must wake the media bridge immediately.  Without
+        # this event the output task can wait forever on an empty queue and the
+        # call is only marked failed after the full call timeout.
+        self.receive_error: BaseException | None = None
+        self.receive_failed = asyncio.Event()
         self.turn_complete = asyncio.Event()
+        self.turn_complete_generation = -1
         self.bot_audio_active = asyncio.Event()
         self.input_transcript = ""
         self.output_transcript = ""
@@ -154,23 +160,27 @@ class GeminiLiveSession:
         self._ensure_connected()
         from google.genai import types
 
+        # Advance the local generation before waiting on the network send
+        # lock. This lets the media bridge discard any packet already dequeued
+        # from the previous model turn as soon as a barge-in is detected.
+        self._input_turn += 1
+        self._generation += 1
+        self.turn_complete.clear()
+        self.bot_audio_active.clear()
+        self.input_transcript = ""
+        self.output_transcript = ""
+        self.clear_output_nowait()
+        generation = self._generation
         async with self._send_lock:
-            self._input_turn += 1
-            self._generation += 1
-            self.turn_complete.clear()
-            self.bot_audio_active.clear()
-            self.input_transcript = ""
-            self.output_transcript = ""
-            self.clear_output_nowait()
             await self.session.send_realtime_input(
                 activity_start=types.ActivityStart()
             )
             self.timeline.add(
                 "GEMINI_ACTIVITY_START_SENT",
                 input_turn=self._input_turn,
-                generation=self._generation,
+                generation=generation,
             )
-            return self._generation
+            return generation
 
     async def send_audio(self, pcm16: bytes) -> None:
         if not pcm16:
@@ -229,6 +239,8 @@ class GeminiLiveSession:
             raise
         except Exception as exc:
             if not self._closed:
+                self.receive_error = exc
+                self.receive_failed.set()
                 self.timeline.add(
                     "GEMINI_RECEIVE_ERROR",
                     error=f"{type(exc).__name__}: {exc}",
@@ -275,16 +287,10 @@ class GeminiLiveSession:
                         )
                     self.bot_audio_active.set()
                     packet = GeminiAudioPacket(generation, pcm)
-                    try:
-                        self.output_audio.put_nowait(packet)
-                    except asyncio.QueueFull:
-                        self.timeline.add(
-                            "GEMINI_OUTPUT_QUEUE_FULL",
-                            generation=generation,
-                        )
-                        logger.error(
-                            "Gemini output queue full; dropping audio packet"
-                        )
+                    # Preserve every audio packet.  The bridge applies
+                    # backpressure to Asterisk's flow-control event, so
+                    # dropping packets here would create audible gaps.
+                    await self.output_audio.put(packet)
 
         if bool(getattr(content, "interrupted", False)):
             cleared = self.clear_output_nowait()
@@ -296,6 +302,7 @@ class GeminiLiveSession:
             )
 
         if bool(getattr(content, "turn_complete", False)):
+            self.turn_complete_generation = self._generation
             self.turn_complete.set()
             self.timeline.add(
                 "GEMINI_TURN_COMPLETE",
@@ -325,3 +332,8 @@ class GeminiLiveSession:
     def _ensure_connected(self) -> None:
         if self.session is None or self._closed:
             raise RuntimeError("Gemini Live session is not connected")
+        if self.receive_error is not None:
+            raise RuntimeError(
+                "Gemini Live receiver failed: "
+                f"{type(self.receive_error).__name__}: {self.receive_error}"
+            ) from self.receive_error
