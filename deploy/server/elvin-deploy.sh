@@ -103,13 +103,13 @@ APP_IMAGE="elvin-backend:${REVISION}"
 
 if ! docker image inspect "$DEPS_IMAGE" >/dev/null 2>&1; then
   log "Building dependency image ${DEPS_IMAGE}..."
-  DOCKER_BUILDKIT=1 docker build --pull -f Dockerfile.deps -t "$DEPS_IMAGE" .
+  docker build --pull -f Dockerfile.deps -t "$DEPS_IMAGE" .
 else
   log "Reusing dependency image ${DEPS_IMAGE}."
 fi
 
 log "Building application image ${APP_IMAGE}..."
-DOCKER_BUILDKIT=1 docker build \
+docker build \
   --build-arg "ELVIN_DEPS_IMAGE=${DEPS_IMAGE}" \
   --label "org.opencontainers.image.revision=${REVISION}" \
   -t "$APP_IMAGE" .
