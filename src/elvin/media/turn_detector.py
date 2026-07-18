@@ -155,7 +155,15 @@ class LocalTurnDetector:
         # The start event is emitted only after Silero has accumulated enough
         # evidence.  The pre-roll then restores the audio that preceded the
         # decision, including the first consonant/syllable.
-        if not self.turn_open and vad_state == self.VADState.SPEAKING:
+        # The Asterisk websocket leg does not provide acoustic echo
+        # cancellation. While the bot is being played, its own far-end audio
+        # can arrive back on the caller leg and Silero will classify it as
+        # speech. Opening a new Gemini activity in that window cuts the
+        # response mid-sentence. Keep the detector half-duplex until the
+        # playback marker turns bot_speaking off.
+        if not self.turn_open and self.bot_speaking and speech_likely:
+            self.smart_turn.clear()
+        elif not self.turn_open and vad_state == self.VADState.SPEAKING:
             self.turn_open = True
             self.turn_started_at = now
             self.silence_started_at = None
