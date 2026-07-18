@@ -276,18 +276,3 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); box-sha
     .settings-actions { flex-direction: column-reverse; }
     #queueContent .preview-summary { grid-template-columns: 1fr 1fr; }
 }
-
-/* New Elvin screen refinements */
-.main-content { min-width: 0; }
-.calls-layout, .robots-layout { min-height: calc(100vh - 150px); }
-.full-width { width: 100%; }
-.form-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 18px; }
-.temperature-field { grid-column: 1 / -1; }
-.settings-card { max-width: 900px; padding: 28px; background: var(--panel); border: 1px solid var(--border); border-radius: 22px; }
-.settings-card label, .robot-editor label, .auth-card label, .modal-card label { display: grid; gap: 8px; margin-bottom: 16px; }
-.settings-card input, .robot-editor input, .robot-editor select, .robot-editor textarea, .auth-card input, .modal-card select { width: 100%; color: var(--text); background: var(--panel-2); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; }
-.settings-card input[readonly], .robot-editor input[readonly] { color: var(--muted); cursor: default; }
-.settings-actions, .editor-footer { display: flex; align-items: center; gap: 14px; justify-content: flex-end; margin-top: 20px; }
-.form-message { min-height: 20px; color: var(--danger); }
-.form-message.success { color: var(--success); }
-@media (max-width: 900px) { .form-grid { grid-template-columns: 1fr; } }

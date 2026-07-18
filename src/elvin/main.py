@@ -119,6 +119,15 @@ def create_app() -> FastAPI:
 
     application.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
+    @application.middleware("http")
+    async def disable_frontend_cache(request: Request, call_next):
+        response = await call_next(request)
+        if request.url.path == "/" or request.url.path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        return response
+
     @application.exception_handler(LPTrackerError)
     async def handle_lptracker_error(_request: Request, exc: LPTrackerError) -> JSONResponse:
         code = 401 if exc.http_status == 401 or exc.api_code == 401 else 502

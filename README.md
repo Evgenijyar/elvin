@@ -127,3 +127,18 @@ python -m compileall src
 ```
 
 Реальный end-to-end тест требует production-секретов, работающего LPTracker SIP-плеча, `chan_websocket` в Asterisk и действующего Gemini API key.
+
+## Server operations
+
+After the one-time command link is installed, normal server operations are:
+
+```bash
+elvin-deploy
+elvin-deploy status
+elvin-deploy health
+elvin-deploy logs 300
+elvin-deploy asterisk-logs 300
+```
+
+`elvin-deploy` first starts an isolated candidate. The previous production
+container is kept as a rollback copy until the new container passes readiness.

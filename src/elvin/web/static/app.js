@@ -236,9 +236,8 @@ function queueStatusLabel(status) {
     const labels = {
         QUEUE_READY: "Очередь готова",
         RUNNING: "Обзвон запущен",
-        AI_PREPARING: "Подключаем Gemini",
-        CALL_REQUESTING: "Запрос LPTracker",
-        WAITING_FOR_MEDIA: "Ожидаем звонок LPTracker",
+        CALL_REQUESTING: "Запрос звонка",
+        WAITING_FOR_MEDIA: "Ожидаем Asterisk",
         IN_CALL: "Разговор",
         STOPPING: "Остановка",
         STOPPED: "Остановлено",
@@ -274,6 +273,10 @@ async function renderCalls() {
                     <span class="status-pill">${escapeHtml(item.status || "STOPPED")}</span>
                 </div>
                 <div class="assignment-body">
+                    <div class="assignment-meta">
+                        <div class="meta-cell"><span>Модель</span><strong>${escapeHtml(item.model_id)}</strong></div>
+                        <div class="meta-cell"><span>Голос</span><strong>${escapeHtml(item.voice_name)}</strong></div>
+                    </div>
                     <label>
                         <span>Стадия, из которой забирать лиды</span>
                         <select class="stage-select">${stageOptions}</select>
@@ -288,6 +291,7 @@ async function renderCalls() {
                         <small></small>
                     </div>
                     <div class="assignment-actions multi-row">
+                        <button class="flat-button preview-button" type="button">Проверить лиды</button>
                         <button class="flat-button prepare-queue" type="button">Собрать очередь</button>
                         <button class="flat-button show-queue" type="button">Открыть очередь</button>
                         <button class="primary-button start" type="button">Старт</button>
@@ -334,6 +338,7 @@ async function renderCalls() {
                 showToast("Лимит сохранён");
             } catch (error) { showToast(error.message, true); }
         });
+        card.querySelector(".preview-button").addEventListener("click", () => previewLeads(id));
         card.querySelector(".prepare-queue").addEventListener("click", () => prepareQueue(id, card));
         card.querySelector(".show-queue").addEventListener("click", () => showQueue(id));
         card.querySelector(".remove-assignment").addEventListener("click", () => removeAssignment(id));
@@ -488,7 +493,7 @@ function renderRobotList() {
     container.innerHTML = state.robots.map((robot) => `
         <button class="robot-list-item ${robot.id === state.selectedRobotId ? "active" : ""}" data-robot-id="${robot.id}">
             <strong>${escapeHtml(robot.name)}</strong>
-            <span>${escapeHtml(robot.description || "Голосовой робот")}</span>
+            <span>${escapeHtml(robot.voice_name)} · ${escapeHtml(robot.model_id)}</span>
         </button>
     `).join("");
     container.querySelectorAll("[data-robot-id]").forEach((button) => {
@@ -560,7 +565,7 @@ async function saveRobot(event) {
     const payload = {
         name: $("#robotName").value.trim(),
         description: $("#robotDescription").value.trim(),
-        model_id: "gemini-3.1-flash-live-preview",
+        model_id: $("#robotModel").value,
         voice_name: $("#robotVoice").value,
         temperature: Number($("#robotTemperature").value),
         role_prompt: $("#robotRole").value,

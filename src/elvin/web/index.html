@@ -1,108 +1,266 @@
 <!doctype html>
 <html lang="ru">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Elvin — голосовые роботы</title>
-  <link rel="stylesheet" href="/static/app.css">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <title>ELVIN | Control Center</title>
+    <link rel="stylesheet" href="/static/app.css">
 </head>
 <body>
-<section id="authScreen" class="auth-screen">
-  <form id="loginForm" class="auth-card">
-    <div class="eyebrow">ELVIN VOICE PLATFORM</div>
-    <h1>Вход через LPTracker</h1>
-    <p class="muted">Используйте логин и пароль вашего аккаунта LPTracker.</p>
-    <label><span>Логин</span><input id="loginInput" autocomplete="username" required></label>
-    <label><span>Пароль</span><input id="passwordInput" type="password" autocomplete="current-password" required></label>
-    <button id="loginButton" class="primary-button" type="submit">Войти</button>
-    <div id="loginMessage" class="form-message"></div>
-  </form>
-</section>
-
-<div id="appShell" class="app-shell hidden">
-  <aside class="main-sidebar">
-    <div class="brand"><div class="brand-mark">E</div><div><strong>Elvin</strong><span>Voice AI</span></div></div>
-    <nav>
-      <button class="nav-button active" data-page="calls">Обзвон</button>
-      <button class="nav-button" data-page="robots">Роботы</button>
-      <button class="nav-button" data-page="settings">Настройки</button>
-    </nav>
-    <div class="sidebar-footer">
-      <span id="runtimeBadge" class="runtime-badge"></span>
-      <button id="logoutButton" class="flat-button">Выйти</button>
+    <div id="authScreen" class="auth-screen">
+        <form id="loginForm" class="auth-card">
+            <div class="brand-orbit">E</div>
+            <div class="eyebrow">AI OUTBOUND CALLING</div>
+            <h1>ELVIN</h1>
+            <p class="muted">Вход через учётную запись LPTracker</p>
+            <label>
+                <span>Логин LPTracker</span>
+                <input id="loginInput" type="text" autocomplete="username" required>
+            </label>
+            <label>
+                <span>Пароль LPTracker</span>
+                <input id="passwordInput" type="password" autocomplete="current-password" required>
+            </label>
+            <button id="loginButton" class="primary-button" type="submit">Войти</button>
+            <div id="loginMessage" class="form-message"></div>
+        </form>
     </div>
-  </aside>
 
-  <main class="main-content">
-    <section id="callsPage" class="page active">
-      <div class="page-heading"><div><div class="eyebrow">ИСХОДЯЩИЕ ЗВОНКИ</div><h1>Обзвон</h1></div><button id="openAssignmentModal" class="primary-button">Добавить робота</button></div>
-      <div class="calls-layout">
-        <aside class="project-sidebar"><h3>Проекты LPTracker</h3><div id="projectList"></div><button class="flat-button full-width" data-open-assignment>+ Добавить проект и робота</button></aside>
-        <div class="calls-main">
-          <div id="callsEmpty" class="empty-state"><h2>Добавьте первого робота</h2><p>Выберите проект LPTracker и сохранённого робота.</p><button class="primary-button" data-open-assignment>Добавить робота</button></div>
-          <div id="callsWorkspace" class="hidden">
-            <div class="workspace-title"><div><h2 id="activeProjectName"></h2><p id="activeProjectMeta" class="muted"></p></div></div>
-            <div id="assignmentGrid" class="assignment-grid"></div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <section id="robotsPage" class="page">
-      <div class="page-heading"><div><div class="eyebrow">ПРОФИЛИ</div><h1>Роботы</h1></div><button id="createRobotButton" class="primary-button">Создать робота</button></div>
-      <div class="robots-layout">
-        <aside class="robot-sidebar"><div id="robotList"></div></aside>
-        <div class="robot-workspace">
-          <div id="robotEditorEmpty" class="empty-state"><h2>Выберите робота</h2><p>Или создайте нового.</p></div>
-          <form id="robotEditor" class="robot-editor hidden">
-            <div class="editor-tabs">
-              <button type="button" class="editor-tab active" data-tab="role">Роль</button>
-              <button type="button" class="editor-tab" data-tab="knowledge">База знаний</button>
-              <button type="button" class="editor-tab" data-tab="config">Настройки</button>
+    <div id="appShell" class="app-shell hidden">
+        <header class="topbar">
+            <div class="brand-block">
+                <div class="brand-orbit small">E</div>
+                <div>
+                    <strong>ELVIN</strong>
+                    <span>Control Center</span>
+                </div>
             </div>
-            <div class="tab-pane active" data-pane="role"><label><span>Роль и сценарий</span><textarea id="robotRole" rows="22" placeholder="Кто робот, цель звонка, правила диалога..."></textarea></label></div>
-            <div class="tab-pane" data-pane="knowledge"><label><span>База знаний</span><textarea id="robotKnowledge" rows="22" placeholder="Продукт, ответы на вопросы, ограничения..."></textarea></label></div>
-            <div class="tab-pane" data-pane="config">
-              <div class="form-grid">
-                <label><span>Название</span><input id="robotName" required></label>
-                <label><span>Описание</span><input id="robotDescription"></label>
-                <label><span>Модель</span><input id="robotModel" value="gemini-3.1-flash-live-preview" readonly></label>
-                <label><span>Голос</span><select id="robotVoice">
-                  <optgroup label="Мужские голоса">
-                    <option>Puck</option><option>Charon</option><option>Fenrir</option><option>Orus</option><option>Enceladus</option><option>Iapetus</option><option>Umbriel</option><option>Algieba</option><option>Algenib</option><option>Rasalgethi</option><option>Alnilam</option><option>Schedar</option><option>Achird</option><option>Zubenelgenubi</option><option>Sadachbia</option><option>Sadaltager</option>
-                  </optgroup>
-                  <optgroup label="Женские голоса">
-                    <option>Zephyr</option><option selected>Kore</option><option>Leda</option><option>Aoede</option><option>Callirrhoe</option><option>Autonoe</option><option>Despina</option><option>Erinome</option><option>Laomedeia</option><option>Achernar</option><option>Gacrux</option><option>Pulcherrima</option><option>Vindemiatrix</option><option>Sulafat</option>
-                  </optgroup>
-                </select></label>
-                <label class="temperature-field"><span>Температура: <strong id="temperatureValue">0.30</strong></span><input id="robotTemperature" type="range" min="0" max="2" step="0.05" value="0.3"></label>
-              </div>
-              <input id="robotFirstPhrase" type="hidden" value="">
-              <div id="geminiKeyStatus" class="key-status"></div>
+            <nav class="topnav">
+                <button class="nav-button active" data-page="calls">Обзвон</button>
+                <button class="nav-button" data-page="robots">Роботы</button>
+                <button class="nav-button" data-page="settings">Настройки</button>
+            </nav>
+            <div class="top-actions">
+                <span id="runtimeBadge" class="runtime-badge">Подключение…</span>
+                <button id="logoutButton" class="flat-button danger">Выйти</button>
             </div>
-            <div class="editor-footer"><button id="deleteRobotButton" class="flat-button danger" type="button">Удалить</button><span id="robotSaveMessage" class="form-message"></span><button class="primary-button" type="submit">Сохранить</button></div>
-          </form>
+        </header>
+
+        <main class="layout">
+            <aside class="sidebar">
+                <div class="sidebar-title">Проекты</div>
+                <button id="openAssignmentModal" class="sidebar-add">
+                    <span class="plus">+</span>
+                    <span>Добавить робота</span>
+                </button>
+                <div class="divider"></div>
+                <div id="projectList" class="project-list"></div>
+            </aside>
+
+            <section class="workspace">
+                <section id="callsPage" class="page active">
+                    <div id="callsEmpty" class="empty-state">
+                        <div class="empty-icon">⌁</div>
+                        <h2>Добавьте первого робота</h2>
+                        <p>Выберите проект LPTracker и сохранённого ИИ-робота.</p>
+                        <button class="primary-button" data-open-assignment>Добавить робота</button>
+                    </div>
+                    <div id="callsWorkspace" class="hidden">
+                        <div class="workspace-heading">
+                            <div>
+                                <div class="eyebrow">АКТИВНЫЙ ПРОЕКТ</div>
+                                <h2 id="activeProjectName"></h2>
+                                <p id="activeProjectMeta" class="muted"></p>
+                            </div>
+                            <button class="flat-button" data-open-assignment>Добавить робота</button>
+                        </div>
+                        <div id="assignmentGrid" class="assignment-grid"></div>
+                    </div>
+                </section>
+
+                <section id="robotsPage" class="page">
+                    <div class="workspace-heading">
+                        <div>
+                            <div class="eyebrow">БИБЛИОТЕКА</div>
+                            <h2>ИИ-роботы Elvin</h2>
+                            <p class="muted">Профили можно назначать на разные проекты LPTracker.</p>
+                        </div>
+                    </div>
+                    <div class="robot-layout">
+                        <aside class="robot-list-panel">
+                            <button id="createRobotButton" class="primary-button full">Создать робота</button>
+                            <div id="robotList" class="robot-list"></div>
+                        </aside>
+                        <section class="robot-editor-panel">
+                            <div id="robotEditorEmpty" class="editor-empty">
+                                <h3>Робот не выбран</h3>
+                                <p>Создайте профиль или выберите существующий слева.</p>
+                            </div>
+                            <form id="robotEditor" class="robot-editor hidden">
+                                <div class="editor-tabs">
+                                    <button type="button" class="editor-tab active" data-tab="role">Роль</button>
+                                    <button type="button" class="editor-tab" data-tab="knowledge">База знаний</button>
+                                    <button type="button" class="editor-tab" data-tab="settings">Настройки</button>
+                                </div>
+
+                                <div class="tab-pane active" data-pane="role">
+                                    <label>
+                                        <span>Роль и системный prompt</span>
+                                        <textarea id="robotRole" rows="22"></textarea>
+                                    </label>
+                                </div>
+
+                                <div class="tab-pane" data-pane="knowledge">
+                                    <label>
+                                        <span>База знаний</span>
+                                        <textarea id="robotKnowledge" rows="22"></textarea>
+                                    </label>
+                                </div>
+
+                                <div class="tab-pane" data-pane="settings">
+                                    <div class="form-grid">
+                                        <label>
+                                            <span>Название</span>
+                                            <input id="robotName" type="text" required>
+                                        </label>
+                                        <label>
+                                            <span>Описание</span>
+                                            <input id="robotDescription" type="text">
+                                        </label>
+                                        <label>
+                                            <span>Модель</span>
+                                            <select id="robotModel">
+                                                <option value="gemini-3.1-flash-live-preview">Gemini 3.1 Flash Live</option>
+                                            </select>
+                                        </label>
+                                        <label>
+                                            <span>Голос</span>
+                                            <select id="robotVoice">
+                                                <option>Kore</option>
+                                                <option>Puck</option>
+                                                <option>Aoede</option>
+                                                <option>Charon</option>
+                                                <option>Fenrir</option>
+                                            </select>
+                                        </label>
+                                        <label class="wide">
+                                            <span>Первая фраза</span>
+                                            <textarea id="robotFirstPhrase" rows="4"></textarea>
+                                        </label>
+                                        <label class="wide">
+                                            <span>Температура: <b id="temperatureValue">0.30</b></span>
+                                            <input id="robotTemperature" type="range" min="0" max="2" step="0.05" value="0.3">
+                                        </label>
+                                    </div>
+                                    <div id="geminiKeyStatus" class="key-status"></div>
+                                </div>
+
+                                <div class="editor-footer">
+                                    <div id="robotSaveMessage" class="form-message"></div>
+                                    <div class="editor-actions">
+                                        <button id="deleteRobotButton" class="flat-button danger" type="button">Удалить</button>
+                                        <button class="primary-button" type="submit">Сохранить</button>
+                                    </div>
+                                </div>
+                            </form>
+                        </section>
+                    </div>
+                </section>
+
+                <section id="settingsPage" class="page">
+                    <div class="workspace-heading">
+                        <div>
+                            <div class="eyebrow">ПОДКЛЮЧЕНИЕ К МОДЕЛИ</div>
+                            <h2>Gemini Live</h2>
+                            <p class="muted">Ключ хранится в данных Elvin и никогда не попадает в Git.</p>
+                        </div>
+                    </div>
+
+                    <form id="geminiSettingsForm" class="settings-card">
+                        <label>
+                            <span>Gemini API key</span>
+                            <input id="geminiApiKey" type="text" autocomplete="off" spellcheck="false" placeholder="AIza...">
+                            <small>Ключ показывается полностью — без звёздочек и маскировки.</small>
+                        </label>
+                        <div class="settings-grid">
+                            <label>
+                                <span>Модель</span>
+                                <input id="geminiModelId" type="text" readonly>
+                            </label>
+                            <label>
+                                <span>WebSocket endpoint</span>
+                                <input id="geminiEndpoint" type="text" readonly>
+                            </label>
+                        </div>
+                        <div class="settings-note">
+                            Endpoint и ID модели зафиксированы в backend. Их не нужно вводить вручную.
+                        </div>
+                        <div id="geminiSettingsMessage" class="form-message"></div>
+                        <div class="settings-actions">
+                            <button id="testGeminiButton" class="flat-button" type="button">Проверить подключение</button>
+                            <button class="primary-button" type="submit">Сохранить ключ</button>
+                        </div>
+                    </form>
+                </section>
+            </section>
+        </main>
+    </div>
+
+    <div id="assignmentModal" class="modal-backdrop hidden">
+        <div class="modal-card">
+            <div class="modal-header">
+                <div>
+                    <div class="eyebrow">НОВОЕ НАЗНАЧЕНИЕ</div>
+                    <h3>Добавить ИИ-робота</h3>
+                </div>
+                <button class="icon-button" data-close-modal>×</button>
+            </div>
+            <form id="assignmentForm">
+                <label>
+                    <span>Проект LPTracker</span>
+                    <select id="assignmentProject" required></select>
+                </label>
+                <label>
+                    <span>Сохранённый робот</span>
+                    <select id="assignmentRobot" required></select>
+                </label>
+                <div id="assignmentMessage" class="form-message"></div>
+                <div class="modal-actions">
+                    <button class="flat-button" type="button" data-close-modal>Отмена</button>
+                    <button class="primary-button" type="submit">Добавить</button>
+                </div>
+            </form>
         </div>
-      </div>
-    </section>
+    </div>
 
-    <section id="settingsPage" class="page">
-      <div class="page-heading"><div><div class="eyebrow">СИСТЕМА</div><h1>Настройки</h1></div></div>
-      <form id="geminiSettingsForm" class="settings-card">
-        <h2>Gemini Live</h2><p class="muted">Редактируется только API-ключ. Модель и endpoint зафиксированы архитектурой.</p>
-        <label><span>Gemini API key</span><input id="geminiApiKey" type="password" autocomplete="off"></label>
-        <label><span>Модель</span><input id="geminiModelId" readonly></label>
-        <label><span>WebSocket endpoint</span><input id="geminiEndpoint" readonly></label>
-        <div class="settings-actions"><button id="testGeminiButton" type="button" class="flat-button">Проверить подключение</button><span id="geminiSettingsMessage" class="form-message"></span><button type="submit" class="primary-button">Сохранить</button></div>
-      </form>
-    </section>
-  </main>
-</div>
+    <div id="leadPreviewModal" class="modal-backdrop hidden">
+        <div class="modal-card wide-modal">
+            <div class="modal-header">
+                <div>
+                    <div class="eyebrow">LPTRACKER</div>
+                    <h3>Лиды выбранной стадии</h3>
+                </div>
+                <button class="icon-button" data-close-preview>×</button>
+            </div>
+            <div id="leadPreviewContent"></div>
+        </div>
+    </div>
 
-<div id="assignmentModal" class="modal hidden"><div class="modal-backdrop" data-close-modal></div><div class="modal-card"><button class="modal-close" data-close-modal>×</button><h2>Добавить робота в проект</h2><form id="assignmentForm"><label><span>Проект LPTracker</span><select id="assignmentProject"></select></label><label><span>Сохранённый робот</span><select id="assignmentRobot"></select></label><div id="assignmentMessage" class="form-message"></div><button class="primary-button" type="submit">Добавить</button></form></div></div>
-<div id="leadPreviewModal" class="modal hidden"><div class="modal-backdrop" data-close-preview></div><div class="modal-card wide"><button class="modal-close" data-close-preview>×</button><h2>Лиды в стадии</h2><div id="leadPreviewContent"></div></div></div>
-<div id="queueModal" class="modal hidden"><div class="modal-backdrop" data-close-queue></div><div class="modal-card wide"><button class="modal-close" data-close-queue>×</button><h2>Очередь звонков</h2><div id="queueContent"></div></div></div>
-<div id="toast" class="toast hidden"></div>
-<script src="/static/app.js" defer></script>
+    <div id="queueModal" class="modal-backdrop hidden">
+        <div class="modal-card wide-modal">
+            <div class="modal-header">
+                <div>
+                    <div class="eyebrow">ОЧЕРЕДЬ ОБЗВОНА</div>
+                    <h3 id="queueModalTitle">Подготовленные лиды</h3>
+                </div>
+                <button class="icon-button" data-close-queue>×</button>
+            </div>
+            <div id="queueContent"></div>
+        </div>
+    </div>
+
+    <div id="toast" class="toast hidden"></div>
+    <script src="/static/app.js"></script>
 </body>
 </html>
