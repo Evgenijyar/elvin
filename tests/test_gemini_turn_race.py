@@ -76,3 +76,34 @@ def test_late_interrupted_turn_is_not_relabelled_as_current() -> None:
         assert packet.pcm24 == b"current-audio"
 
     asyncio.run(exercise())
+
+
+def test_new_audio_is_not_dropped_when_old_turn_complete_is_late() -> None:
+    session = _session_for_response_test()
+    current_audio = SimpleNamespace(
+        inline_data=SimpleNamespace(data=b"current-audio")
+    )
+
+    async def exercise() -> None:
+        await session._handle_response(
+            SimpleNamespace(
+                server_content=SimpleNamespace(
+                    model_turn=SimpleNamespace(parts=[current_audio]),
+                )
+            )
+        )
+        packet = await session.output_audio.get()
+        assert packet.generation == 2
+        assert packet.pcm24 == b"current-audio"
+        session.output_audio.task_done()
+        assert session._pending_server_generation == 1
+
+        await session._handle_response(
+            SimpleNamespace(
+                server_content=SimpleNamespace(turn_complete=True)
+            )
+        )
+        assert session._pending_server_generation is None
+        assert session.turn_complete_generation == 1
+
+    asyncio.run(exercise())

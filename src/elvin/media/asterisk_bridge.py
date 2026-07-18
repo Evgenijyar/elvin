@@ -153,14 +153,8 @@ class AsteriskGeminiBridge:
         self._output_buffer_lock = asyncio.Lock()
         self._last_echo_event_at = 0.0
         self._next_output_send_at = 0.0
-        # If the caller starts another turn while Gemini is still finishing
-        # the previous response (but no bot audio is currently playing), keep
-        # that turn locally and send it only after the server turn-complete.
-        # Starting overlapping manual activities can otherwise leave a turn
-        # without any audio response.
-        self._deferred_turn_audio: bytearray | None = None
-        self._deferred_turns: asyncio.Queue[bytes] = asyncio.Queue()
-        self._deferred_sender_busy = False
+        self._last_output_frame_sent_at = 0.0
+        self._output_frame_index = 0
         self._active_activity_started = False
 
     async def run(self) -> str:
@@ -176,11 +170,7 @@ class AsteriskGeminiBridge:
             self._playback_monitor(),
             name=f"asterisk-playback-monitor-{self.call.identity.call_id}",
         )
-        deferred_task = asyncio.create_task(
-            self._deferred_turn_loop(),
-            name=f"gemini-deferred-turns-{self.call.identity.call_id}",
-        )
-        tasks = {input_task, output_task, monitor_task, deferred_task}
+        tasks = {input_task, output_task, monitor_task}
         result = "caller_hangup"
         try:
             done, pending = await asyncio.wait(
@@ -281,9 +271,21 @@ class AsteriskGeminiBridge:
                     # frame before the caller speaks again.
                     self.resampler.reset()
                     await self._discard_output_buffer()
-                    if decision.interrupted_bot:
-                        self._deferred_turn_audio = None
-                        self._discard_deferred_turns()
+                    response_open_generation = getattr(
+                        self.call.gemini,
+                        "response_open_generation",
+                        None,
+                    )
+                    # A caller who starts speaking while Gemini is preparing
+                    # its first audio packet must interrupt that response too.
+                    # Waiting for turn_complete here lets the old response
+                    # start underneath the caller's speech and creates an
+                    # audible overlap at the turn boundary.
+                    should_interrupt = (
+                        decision.interrupted_bot
+                        or response_open_generation is not None
+                    )
+                    if should_interrupt:
                         cleared = self.call.gemini.clear_output_nowait()
                         # Advance Gemini's generation before flushing Asterisk
                         # so an output chunk that was already dequeued cannot
@@ -292,108 +294,34 @@ class AsteriskGeminiBridge:
                         await self.protocol.command("FLUSH_MEDIA")
                         self.echo_guard.clear()
                         self._next_output_send_at = 0.0
+                        self._last_output_frame_sent_at = 0.0
                         self.call.detector.set_bot_speaking(False)
                         self._active_activity_started = True
                         self.call.timeline.add(
                             "BARGE_IN_FLUSH",
                             cleared_gemini_packets=cleared,
+                            reason=(
+                                "bot_audio"
+                                if decision.interrupted_bot
+                                else "pending_response"
+                            ),
                         )
                     else:
-                        # A response can exist before its first audio packet
-                        # arrives.  Do not open a second manual activity in
-                        # that window: Gemini may cancel both responses and
-                        # leave the caller with silence.  The complete turn
-                        # is queued and serialized by _deferred_turn_loop.
-                        should_defer = (
-                            self._deferred_sender_busy
-                            or not self._deferred_turns.empty()
-                            or getattr(
-                                self.call.gemini,
-                                "response_open_generation",
-                                None,
-                            )
-                            is not None
-                        )
-                        if should_defer:
-                            self._deferred_turn_audio = bytearray()
-                            self.call.timeline.add(
-                                "GEMINI_ACTIVITY_DEFERRED",
-                                previous_generation=(
-                                    getattr(
-                                        self.call.gemini,
-                                        "response_open_generation",
-                                        None,
-                                    )
-                                ),
-                            )
-                        else:
-                            await self.call.gemini.start_activity()
-                            self._active_activity_started = True
+                        await self.call.gemini.start_activity()
+                        self._active_activity_started = True
 
                 if decision.audio_to_gemini:
-                    if self._deferred_turn_audio is not None:
-                        self._deferred_turn_audio.extend(
-                            decision.audio_to_gemini
-                        )
-                    elif self._active_activity_started:
+                    if self._active_activity_started:
                         await self.call.gemini.send_audio(
                             decision.audio_to_gemini
                         )
 
                 if decision.speech_ended:
-                    if self._deferred_turn_audio is not None:
-                        await self._deferred_turns.put(
-                            bytes(self._deferred_turn_audio)
-                        )
-                        self._deferred_turn_audio = None
-                    elif self._active_activity_started:
+                    if self._active_activity_started:
                         await self.call.gemini.end_activity()
                         self._active_activity_started = False
         except WebSocketDisconnect:
             return "caller_hangup"
-
-    def _discard_deferred_turns(self) -> None:
-        while True:
-            try:
-                self._deferred_turns.get_nowait()
-            except asyncio.QueueEmpty:
-                return
-            else:
-                self._deferred_turns.task_done()
-
-    async def _deferred_turn_loop(self) -> None:
-        while True:
-            audio = await self._deferred_turns.get()
-            self._deferred_sender_busy = True
-            try:
-                try:
-                    await self.call.gemini.wait_for_response_idle(
-                        timeout=8.0
-                    )
-                except TimeoutError:
-                    # A stuck server response must not block all subsequent
-                    # caller turns forever.  Starting the activity now lets
-                    # Gemini issue its normal interrupted/turn-complete
-                    # sequence and gives the newest utterance a chance to
-                    # produce audio.
-                    self.call.timeline.add(
-                        "GEMINI_RESPONSE_WAIT_TIMEOUT",
-                        generation=getattr(
-                            self.call.gemini,
-                            "response_open_generation",
-                            None,
-                        ),
-                    )
-                await self.call.gemini.start_activity()
-                await self.call.gemini.send_audio(audio)
-                await self.call.gemini.end_activity()
-                self.call.timeline.add(
-                    "GEMINI_ACTIVITY_DEFERRED_SENT",
-                    bytes=len(audio),
-                )
-            finally:
-                self._deferred_sender_busy = False
-                self._deferred_turns.task_done()
 
     async def _output_loop(self) -> None:
         while True:
@@ -483,23 +411,55 @@ class AsteriskGeminiBridge:
             0.005, float(self.protocol.info.ptime or 20) / 1000.0
         )
         next_output_send_at = getattr(self, "_next_output_send_at", 0.0)
+        loop = asyncio.get_running_loop()
         for offset in range(0, len(chunk), frame_size):
             if generation is not None and generation != self.call.gemini.generation:
                 return
             frame = chunk[offset : offset + frame_size]
             if len(frame) < frame_size:
                 frame += b"\x00" * (frame_size - len(frame))
-            now = asyncio.get_running_loop().time()
+            now = loop.time()
             if next_output_send_at > now:
                 await asyncio.sleep(next_output_send_at - now)
             if generation is not None and generation != self.call.gemini.generation:
                 return
+            frame_deadline = max(next_output_send_at, loop.time())
+            send_started_at = loop.time()
             await self.protocol.send_media(frame)
+            sent_at = loop.time()
             self.call.bot_audio.submit(frame)
             echo_guard = getattr(self, "echo_guard", None)
             if echo_guard is not None:
                 echo_guard.note_playback(frame)
-            next_output_send_at = max(next_output_send_at, now) + ptime_seconds
+            self._output_frame_index = (
+                getattr(self, "_output_frame_index", 0) + 1
+            )
+            previous_sent_at = getattr(
+                self, "_last_output_frame_sent_at", 0.0
+            )
+            if previous_sent_at:
+                actual_gap_ms = (sent_at - previous_sent_at) * 1000.0
+                expected_gap_ms = ptime_seconds * 1000.0
+                if actual_gap_ms > max(expected_gap_ms * 1.75, expected_gap_ms + 25.0):
+                    self.call.timeline.add(
+                        "ASTERISK_OUTPUT_GAP",
+                        generation=generation,
+                        frame_index=self._output_frame_index,
+                        expected_ms=round(expected_gap_ms, 1),
+                        actual_ms=round(actual_gap_ms, 1),
+                        send_wait_ms=round(
+                            (sent_at - send_started_at) * 1000.0, 1
+                        ),
+                        bytes=len(frame),
+                    )
+            self._last_output_frame_sent_at = sent_at
+            # Never try to catch up with several frames at once after a delayed
+            # websocket send.  If one frame was late, allow at most the next
+            # frame to go immediately, then resume the normal ptime cadence.
+            next_output_send_at = max(
+                frame_deadline + ptime_seconds,
+                sent_at,
+            )
             self._next_output_send_at = next_output_send_at
 
     async def _discard_output_buffer(self) -> None:
