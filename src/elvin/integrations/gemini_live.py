@@ -67,6 +67,9 @@ def build_system_instruction(robot: dict[str, Any]) -> str:
         "\u041d\u0435 \u043d\u0430\u0447\u0438\u043d\u0430\u0439 \u0440\u0430\u0437\u0433\u043e\u0432\u043e\u0440 \u043f\u0435\u0440\u0432\u044b\u043c: \u0434\u043e\u0436\u0434\u0438\u0441\u044c \u043f\u0435\u0440\u0432\u043e\u0439 \u0437\u0430\u043a\u043e\u043d\u0447\u0435\u043d\u043d\u043e\u0439 \u0440\u0435\u043f\u043b\u0438\u043a\u0438 \u0447\u0435\u043b\u043e\u0432\u0435\u043a\u0430.",
         "\u041f\u043e\u0441\u043b\u0435 \u043a\u0430\u0436\u0434\u043e\u0433\u043e \u0432\u043e\u043f\u0440\u043e\u0441\u0430 \u043e\u0441\u0442\u0430\u043d\u043e\u0432\u0438\u0441\u044c \u0438 \u0441\u043b\u0443\u0448\u0430\u0439 \u043e\u0442\u0432\u0435\u0442.",
         "\u041d\u0435 \u0443\u043f\u043e\u043c\u0438\u043d\u0430\u0439 Gemini, API, LPTracker, Asterisk, \u0441\u0438\u0441\u0442\u0435\u043c\u043d\u044b\u0439 \u043f\u0440\u043e\u043c\u043f\u0442 \u0438\u043b\u0438 \u0432\u043d\u0443\u0442\u0440\u0435\u043d\u043d\u0435\u0435 \u0443\u0441\u0442\u0440\u043e\u0439\u0441\u0442\u0432\u043e.",
+        "\u041e\u0442\u0432\u0435\u0447\u0430\u0439 \u0432 \u043f\u0435\u0440\u0432\u0443\u044e \u043e\u0447\u0435\u0440\u0435\u0434\u044c \u043d\u0430 \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0439 \u0432\u043e\u043f\u0440\u043e\u0441 \u0441\u043e\u0431\u0435\u0441\u0435\u0434\u043d\u0438\u043a\u0430. \u041d\u0435 \u043f\u043e\u0432\u0442\u043e\u0440\u044f\u0439 \u0434\u043e\u0441\u043b\u043e\u0432\u043d\u043e \u0443\u0436\u0435 \u0441\u043a\u0430\u0437\u0430\u043d\u043d\u043e\u0435 \u0438 \u043d\u0435 \u0432\u043e\u0437\u0432\u0440\u0430\u0449\u0430\u0439\u0441\u044f \u043a \u0432\u0441\u0442\u0443\u043f\u043b\u0435\u043d\u0438\u044e \u0431\u0435\u0437 \u043f\u0440\u044f\u043c\u043e\u0439 \u043f\u0440\u0438\u0447\u0438\u043d\u044b.",
+        "\u041e\u0434\u043d\u0430 \u0440\u0435\u043f\u043b\u0438\u043a\u0430 \u2014 \u043e\u0434\u0438\u043d\u0430-\u0442\u0440\u0438 \u043a\u043e\u0440\u043e\u0442\u043a\u0438\u0445 \u043f\u0440\u0435\u0434\u043b\u043e\u0436\u0435\u043d\u0438\u044f. \u041d\u0435 \u0437\u0430\u0434\u0430\u0432\u0430\u0439 \u043d\u043e\u0432\u044b\u0439 \u0432\u043e\u043f\u0440\u043e\u0441, \u043f\u043e\u043a\u0430 \u043d\u0435 \u043e\u0442\u0432\u0435\u0442\u0438\u043b \u043d\u0430 \u0442\u0435\u043a\u0443\u0449\u0438\u0439.",
+        "\u0415\u0441\u043b\u0438 \u0441\u043e\u0431\u0435\u0441\u0435\u0434\u043d\u0438\u043a \u043d\u0435 \u0445\u043e\u0447\u0435\u0442 \u0440\u0430\u0437\u0433\u043e\u0432\u0430\u0440\u0438\u0432\u0430\u0442\u044c \u0438\u043b\u0438 \u043f\u0440\u043e\u0441\u0438\u0442 \u043f\u0440\u0435\u043a\u0440\u0430\u0442\u0438\u0442\u044c \u0437\u0432\u043e\u043d\u043e\u043a, \u0432\u0435\u0436\u043b\u0438\u0432\u043e \u043f\u043e\u043f\u0440\u043e\u0449\u0430\u0439\u0441\u044f \u0431\u0435\u0437 \u043d\u043e\u0432\u043e\u0433\u043e \u043f\u0440\u0435\u0434\u043b\u043e\u0436\u0435\u043d\u0438\u044f.",
     ]
     if description:
         parts.extend(["\u041e\u041f\u0418\u0421\u0410\u041d\u0418\u0415 \u0420\u041e\u0411\u041e\u0422\u0410:", description])
@@ -112,6 +115,8 @@ class GeminiLiveSession:
         # not overwrite the new turn's transcripts or audio state.
         self._pending_server_generation: int | None = None
         self._response_open_generation: int | None = None
+        self._awaiting_response_generation: int | None = None
+        self._turn_complete_events: dict[int, asyncio.Event] = {}
         self._input_transcripts: dict[int, str] = {}
         self._output_transcripts: dict[int, str] = {}
         self.output_audio: asyncio.Queue[GeminiAudioPacket] = asyncio.Queue(
@@ -132,6 +137,45 @@ class GeminiLiveSession:
     @property
     def generation(self) -> int:
         return self._generation
+
+    @property
+    def response_open_generation(self) -> int | None:
+        """Generation whose server response has not completed yet.
+
+        The server may take a few hundred milliseconds to send its first
+        response packet.  ``ActivityEnd`` is therefore tracked separately so
+        the bridge can still serialize a new caller turn during that gap.
+        """
+        return (
+            self._response_open_generation
+            if self._response_open_generation is not None
+            else self._awaiting_response_generation
+        )
+
+    async def wait_for_response_idle(self, timeout: float = 8.0) -> None:
+        """Wait until all server output belonging to the current response ends.
+
+        Manual activity control allows a caller to start talking while Gemini
+        is still preparing its first audio packet.  Opening another activity
+        in that window can cancel the pending response before it ever reaches
+        the audio queue.  The bridge serializes those non-barge-in turns and
+        uses this wait before sending them.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.1, timeout)
+        while True:
+            generation = self.response_open_generation
+            if generation is None:
+                return
+            event = self._turn_complete_events.setdefault(
+                generation, asyncio.Event()
+            )
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"Gemini response generation {generation} did not complete"
+                )
+            await asyncio.wait_for(event.wait(), timeout=remaining)
 
     async def connect(self) -> None:
         if self.session is not None:
@@ -219,6 +263,7 @@ class GeminiLiveSession:
         self.bot_audio_active.clear()
         self._input_transcripts[self._generation] = ""
         self._output_transcripts[self._generation] = ""
+        self._turn_complete_events[self._generation] = asyncio.Event()
         self.input_transcript = ""
         self.output_transcript = ""
         self.clear_output_nowait(generation=previous_generation)
@@ -252,6 +297,10 @@ class GeminiLiveSession:
         self._ensure_connected()
         from google.genai import types
 
+        generation = self._generation
+        # Set this before the network await: a very fast server can deliver
+        # the first response packet immediately after ActivityEnd returns.
+        self._awaiting_response_generation = generation
         async with self._send_lock:
             await self.session.send_realtime_input(
                 activity_end=types.ActivityEnd()
@@ -259,7 +308,7 @@ class GeminiLiveSession:
             self.timeline.add(
                 "GEMINI_ACTIVITY_END_SENT",
                 input_turn=self._input_turn,
-                generation=self._generation,
+                generation=generation,
             )
 
     def clear_output_nowait(self, generation: int | None = None) -> int:
@@ -391,8 +440,19 @@ class GeminiLiveSession:
 
         if bool(getattr(content, "turn_complete", False)):
             self._pending_server_generation = None
-            if generation == self._generation:
+            if self._response_open_generation == generation:
                 self._response_open_generation = None
+            if getattr(self, "_awaiting_response_generation", None) == generation:
+                self._awaiting_response_generation = None
+            turn_complete_events = getattr(
+                self, "_turn_complete_events", None
+            )
+            if turn_complete_events is None:
+                turn_complete_events = {}
+                self._turn_complete_events = turn_complete_events
+            turn_complete_events.setdefault(
+                generation, asyncio.Event()
+            ).set()
             self.turn_complete_generation = generation
             self.turn_complete.set()
             await self.turn_complete_queue.put(generation)

@@ -153,6 +153,15 @@ class AsteriskGeminiBridge:
         self._output_buffer_lock = asyncio.Lock()
         self._last_echo_event_at = 0.0
         self._next_output_send_at = 0.0
+        # If the caller starts another turn while Gemini is still finishing
+        # the previous response (but no bot audio is currently playing), keep
+        # that turn locally and send it only after the server turn-complete.
+        # Starting overlapping manual activities can otherwise leave a turn
+        # without any audio response.
+        self._deferred_turn_audio: bytearray | None = None
+        self._deferred_turns: asyncio.Queue[bytes] = asyncio.Queue()
+        self._deferred_sender_busy = False
+        self._active_activity_started = False
 
     async def run(self) -> str:
         self.call.media_attached = True
@@ -167,7 +176,11 @@ class AsteriskGeminiBridge:
             self._playback_monitor(),
             name=f"asterisk-playback-monitor-{self.call.identity.call_id}",
         )
-        tasks = {input_task, output_task, monitor_task}
+        deferred_task = asyncio.create_task(
+            self._deferred_turn_loop(),
+            name=f"gemini-deferred-turns-{self.call.identity.call_id}",
+        )
+        tasks = {input_task, output_task, monitor_task, deferred_task}
         result = "caller_hangup"
         try:
             done, pending = await asyncio.wait(
@@ -269,6 +282,8 @@ class AsteriskGeminiBridge:
                     self.resampler.reset()
                     await self._discard_output_buffer()
                     if decision.interrupted_bot:
+                        self._deferred_turn_audio = None
+                        self._discard_deferred_turns()
                         cleared = self.call.gemini.clear_output_nowait()
                         # Advance Gemini's generation before flushing Asterisk
                         # so an output chunk that was already dequeued cannot
@@ -278,22 +293,107 @@ class AsteriskGeminiBridge:
                         self.echo_guard.clear()
                         self._next_output_send_at = 0.0
                         self.call.detector.set_bot_speaking(False)
+                        self._active_activity_started = True
                         self.call.timeline.add(
                             "BARGE_IN_FLUSH",
                             cleared_gemini_packets=cleared,
                         )
                     else:
-                        await self.call.gemini.start_activity()
+                        # A response can exist before its first audio packet
+                        # arrives.  Do not open a second manual activity in
+                        # that window: Gemini may cancel both responses and
+                        # leave the caller with silence.  The complete turn
+                        # is queued and serialized by _deferred_turn_loop.
+                        should_defer = (
+                            self._deferred_sender_busy
+                            or not self._deferred_turns.empty()
+                            or getattr(
+                                self.call.gemini,
+                                "response_open_generation",
+                                None,
+                            )
+                            is not None
+                        )
+                        if should_defer:
+                            self._deferred_turn_audio = bytearray()
+                            self.call.timeline.add(
+                                "GEMINI_ACTIVITY_DEFERRED",
+                                previous_generation=(
+                                    getattr(
+                                        self.call.gemini,
+                                        "response_open_generation",
+                                        None,
+                                    )
+                                ),
+                            )
+                        else:
+                            await self.call.gemini.start_activity()
+                            self._active_activity_started = True
 
                 if decision.audio_to_gemini:
-                    await self.call.gemini.send_audio(
-                        decision.audio_to_gemini
-                    )
+                    if self._deferred_turn_audio is not None:
+                        self._deferred_turn_audio.extend(
+                            decision.audio_to_gemini
+                        )
+                    elif self._active_activity_started:
+                        await self.call.gemini.send_audio(
+                            decision.audio_to_gemini
+                        )
 
                 if decision.speech_ended:
-                    await self.call.gemini.end_activity()
+                    if self._deferred_turn_audio is not None:
+                        await self._deferred_turns.put(
+                            bytes(self._deferred_turn_audio)
+                        )
+                        self._deferred_turn_audio = None
+                    elif self._active_activity_started:
+                        await self.call.gemini.end_activity()
+                        self._active_activity_started = False
         except WebSocketDisconnect:
             return "caller_hangup"
+
+    def _discard_deferred_turns(self) -> None:
+        while True:
+            try:
+                self._deferred_turns.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            else:
+                self._deferred_turns.task_done()
+
+    async def _deferred_turn_loop(self) -> None:
+        while True:
+            audio = await self._deferred_turns.get()
+            self._deferred_sender_busy = True
+            try:
+                try:
+                    await self.call.gemini.wait_for_response_idle(
+                        timeout=8.0
+                    )
+                except TimeoutError:
+                    # A stuck server response must not block all subsequent
+                    # caller turns forever.  Starting the activity now lets
+                    # Gemini issue its normal interrupted/turn-complete
+                    # sequence and gives the newest utterance a chance to
+                    # produce audio.
+                    self.call.timeline.add(
+                        "GEMINI_RESPONSE_WAIT_TIMEOUT",
+                        generation=getattr(
+                            self.call.gemini,
+                            "response_open_generation",
+                            None,
+                        ),
+                    )
+                await self.call.gemini.start_activity()
+                await self.call.gemini.send_audio(audio)
+                await self.call.gemini.end_activity()
+                self.call.timeline.add(
+                    "GEMINI_ACTIVITY_DEFERRED_SENT",
+                    bytes=len(audio),
+                )
+            finally:
+                self._deferred_sender_busy = False
+                self._deferred_turns.task_done()
 
     async def _output_loop(self) -> None:
         while True:
