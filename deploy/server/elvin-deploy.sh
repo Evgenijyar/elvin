@@ -76,6 +76,7 @@ esac
 # Keep the global command permanently attached to the current repository script.
 chmod +x "$APP_DIR/deploy/server/elvin-deploy.sh" 2>/dev/null || true
 ln -sfn "$APP_DIR/deploy/server/elvin-deploy.sh" /usr/local/bin/elvin-deploy
+ln -sfn "$APP_DIR/deploy/server/elvin-deploy.sh" /usr/local/sbin/elvin-deploy
 
 cd "$APP_DIR"
 log "Fetching origin/${BRANCH}..."
@@ -85,6 +86,7 @@ git reset --hard "origin/${BRANCH}"
 # The fetched revision can contain a newer copy of this file; refresh the command link.
 chmod +x deploy/server/elvin-deploy.sh
 ln -sfn "$APP_DIR/deploy/server/elvin-deploy.sh" /usr/local/bin/elvin-deploy
+ln -sfn "$APP_DIR/deploy/server/elvin-deploy.sh" /usr/local/sbin/elvin-deploy
 
 required=(pyproject.toml uv.lock media-requirements.txt Dockerfile.deps Dockerfile)
 for file in "${required[@]}"; do
