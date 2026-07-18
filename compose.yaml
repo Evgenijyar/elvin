@@ -1,0 +1,21 @@
+services:
+  elvin-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.standalone
+    image: elvin-backend:local
+    container_name: elvin-backend-local
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ./data:/opt/lead-voice/data
+      - ./logs:/opt/lead-voice/logs
+      - ./recordings:/opt/lead-voice/recordings
+    logging:
+      driver: local
+      options:
+        max-size: "50m"
+        max-file: "5"

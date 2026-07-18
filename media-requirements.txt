@@ -1,0 +1,8 @@
+# Smart Turn v3 runs through ONNX and is already included in the
+# pipecat-ai core package. Do not install the legacy local-smart-turn
+# extra: it pulls PyTorch, CoreML and multi-gigabyte CUDA libraries.
+pipecat-ai[google,silero]==1.5.0
+pipecat-asterisk==0.1.3
+# Pipecat allows a broad google-genai range. Pin the exact protocol SDK so
+# Live VAD, session setup and realtime message semantics are reproducible.
+google-genai==2.11.0

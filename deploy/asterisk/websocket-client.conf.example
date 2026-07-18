@@ -1,0 +1,8 @@
+; Adjust only if the existing server configuration differs.
+[elvin-media]
+type=websocket_client
+uri=ws://127.0.0.1:8000/api/media/asterisk
+protocols=media
+connection_type=per_call
+connection_timeout=1000
+reconnect_interval=1000

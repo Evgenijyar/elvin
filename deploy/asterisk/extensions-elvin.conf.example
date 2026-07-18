@@ -1,0 +1,7 @@
+; LPTracker calls this Asterisk endpoint as its "employee" leg.
+; Asterisk answers; it never dials the customer in this architecture.
+[elvin-from-lptracker]
+exten => s,1,NoOp(Elvin inbound leg from LPTracker)
+ same => n,Answer()
+ same => n,Dial(WebSocket/elvin-media/c(slin16)f(json))
+ same => n,Hangup()
