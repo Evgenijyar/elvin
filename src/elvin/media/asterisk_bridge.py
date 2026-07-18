@@ -342,30 +342,40 @@ class AsteriskGeminiBridge:
     async def _playback_monitor(self) -> None:
         handled_generation = -1
         while True:
-            await self.call.gemini.turn_complete.wait()
-            generation = self.call.gemini.turn_complete_generation
-            self.call.gemini.turn_complete.clear()
+            generation = await self.call.gemini.turn_complete_queue.get()
             if generation == handled_generation:
+                self.call.gemini.turn_complete_queue.task_done()
                 continue
             handled_generation = generation
+            # A barge-in can produce a late turn-complete notification for the
+            # generation that was just interrupted. It must not flush/mark
+            # playback or clear the speaking state of the newer response.
+            if generation != self.call.gemini.generation:
+                self.call.gemini.turn_complete_queue.task_done()
+                continue
 
             # Wait until all Gemini packets already received have been handed
             # to Asterisk, then place a marker behind them in Asterisk's queue.
-            await self.call.gemini.output_audio.join()
-            await self._send_output_audio(b"", generation=generation, flush=True)
-            correlation_id = f"elvin-{generation}"
             try:
-                waiter = await self.protocol.mark(correlation_id)
-                await asyncio.wait_for(waiter.wait(), timeout=15.0)
-                self.call.timeline.add(
-                    "ASTERISK_PLAYBACK_END",
-                    generation=generation,
-                    confirmed=True,
+                await self.call.gemini.output_audio.join()
+                await self._send_output_audio(
+                    b"", generation=generation, flush=True
                 )
-            except TimeoutError:
-                self.call.timeline.add(
-                    "ASTERISK_PLAYBACK_END",
-                    generation=generation,
-                    confirmed=False,
-                )
-            self.call.detector.set_bot_speaking(False)
+                correlation_id = f"elvin-{generation}"
+                try:
+                    waiter = await self.protocol.mark(correlation_id)
+                    await asyncio.wait_for(waiter.wait(), timeout=15.0)
+                    self.call.timeline.add(
+                        "ASTERISK_PLAYBACK_END",
+                        generation=generation,
+                        confirmed=True,
+                    )
+                except TimeoutError:
+                    self.call.timeline.add(
+                        "ASTERISK_PLAYBACK_END",
+                        generation=generation,
+                        confirmed=False,
+                    )
+                self.call.detector.set_bot_speaking(False)
+            finally:
+                self.call.gemini.turn_complete_queue.task_done()

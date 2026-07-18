@@ -68,6 +68,14 @@ class GeminiLiveSession:
         self._generation = 0
         self._input_turn = 0
         self._first_audio_seen_for_generation: set[int] = set()
+        # Gemini can send the interrupted/turn-complete notifications for the
+        # previous model turn after the caller has already started the next
+        # activity. Keep that previous generation separate so late packets do
+        # not overwrite the new turn's transcripts or audio state.
+        self._pending_server_generation: int | None = None
+        self._response_open_generation: int | None = None
+        self._input_transcripts: dict[int, str] = {}
+        self._output_transcripts: dict[int, str] = {}
         self.output_audio: asyncio.Queue[GeminiAudioPacket] = asyncio.Queue(
             maxsize=400
         )
@@ -78,6 +86,7 @@ class GeminiLiveSession:
         self.receive_failed = asyncio.Event()
         self.turn_complete = asyncio.Event()
         self.turn_complete_generation = -1
+        self.turn_complete_queue: asyncio.Queue[int] = asyncio.Queue()
         self.bot_audio_active = asyncio.Event()
         self.input_transcript = ""
         self.output_transcript = ""
@@ -164,12 +173,17 @@ class GeminiLiveSession:
         # lock. This lets the media bridge discard any packet already dequeued
         # from the previous model turn as soon as a barge-in is detected.
         self._input_turn += 1
+        previous_generation = self._generation
+        if self._response_open_generation == previous_generation:
+            self._pending_server_generation = previous_generation
         self._generation += 1
         self.turn_complete.clear()
         self.bot_audio_active.clear()
+        self._input_transcripts[self._generation] = ""
+        self._output_transcripts[self._generation] = ""
         self.input_transcript = ""
         self.output_transcript = ""
-        self.clear_output_nowait()
+        self.clear_output_nowait(generation=previous_generation)
         generation = self._generation
         async with self._send_lock:
             await self.session.send_realtime_input(
@@ -210,15 +224,21 @@ class GeminiLiveSession:
                 generation=self._generation,
             )
 
-    def clear_output_nowait(self) -> int:
+    def clear_output_nowait(self, generation: int | None = None) -> int:
         cleared = 0
+        retained: list[GeminiAudioPacket] = []
         while True:
             try:
-                self.output_audio.get_nowait()
+                packet = self.output_audio.get_nowait()
                 self.output_audio.task_done()
-                cleared += 1
+                if generation is None or packet.generation == generation:
+                    cleared += 1
+                else:
+                    retained.append(packet)
             except asyncio.QueueEmpty:
                 break
+        for packet in retained:
+            self.output_audio.put_nowait(packet)
         return cleared
 
     async def _receive_loop(self) -> None:
@@ -252,18 +272,37 @@ class GeminiLiveSession:
         if content is None:
             return
 
+        # When a new local activity interrupts a still-streaming response,
+        # Gemini's next notifications belong to the previous generation until
+        # its turn-complete marker arrives. Do not relabel them as the new
+        # caller turn.
+        generation = (
+            self._pending_server_generation
+            if self._pending_server_generation is not None
+            else self._generation
+        )
+        is_pending_previous = self._pending_server_generation is not None
+        input_transcript = self._input_transcripts.setdefault(generation, "")
+        output_transcript = self._output_transcripts.setdefault(generation, "")
+
         input_transcription = getattr(content, "input_transcription", None)
         if input_transcription is not None:
             text = str(getattr(input_transcription, "text", "") or "")
             if text:
-                self.input_transcript += text
+                input_transcript += text
+                self._input_transcripts[generation] = input_transcript
+                if generation == self._generation:
+                    self.input_transcript = input_transcript
                 logger.info("Gemini input transcription: %s", text)
 
         output_transcription = getattr(content, "output_transcription", None)
         if output_transcription is not None:
             text = str(getattr(output_transcription, "text", "") or "")
             if text:
-                self.output_transcript += text
+                output_transcript += text
+                self._output_transcripts[generation] = output_transcript
+                if generation == self._generation:
+                    self.output_transcript = output_transcript
                 logger.info("Gemini output transcription: %s", text)
 
         model_turn = getattr(content, "model_turn", None)
@@ -277,7 +316,12 @@ class GeminiLiveSession:
                 if isinstance(pcm, bytearray):
                     pcm = bytes(pcm)
                 if isinstance(pcm, bytes) and pcm:
-                    generation = self._generation
+                    if is_pending_previous:
+                        # Audio for the interrupted turn is stale. The
+                        # following turn-complete event will release the
+                        # pending marker, after which new audio is accepted.
+                        continue
+                    self._response_open_generation = generation
                     if generation not in self._first_audio_seen_for_generation:
                         self._first_audio_seen_for_generation.add(generation)
                         self.timeline.add(
@@ -293,22 +337,26 @@ class GeminiLiveSession:
                     await self.output_audio.put(packet)
 
         if bool(getattr(content, "interrupted", False)):
-            cleared = self.clear_output_nowait()
+            cleared = self.clear_output_nowait(generation=generation)
             self.bot_audio_active.clear()
             self.timeline.add(
                 "GEMINI_INTERRUPTED",
-                generation=self._generation,
+                generation=generation,
                 cleared_packets=cleared,
             )
 
         if bool(getattr(content, "turn_complete", False)):
-            self.turn_complete_generation = self._generation
+            self._pending_server_generation = None
+            if generation == self._generation:
+                self._response_open_generation = None
+            self.turn_complete_generation = generation
             self.turn_complete.set()
+            await self.turn_complete_queue.put(generation)
             self.timeline.add(
                 "GEMINI_TURN_COMPLETE",
-                generation=self._generation,
-                input_transcript=self.input_transcript.strip(),
-                output_transcript=self.output_transcript.strip(),
+                generation=generation,
+                input_transcript=input_transcript.strip(),
+                output_transcript=output_transcript.strip(),
             )
 
     async def close(self) -> None:
