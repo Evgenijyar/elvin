@@ -33,6 +33,11 @@ class TurnDetectorConfig:
     vad_min_volume: float = 0.03
     pre_roll_ms: int = 240
     smart_turn_retry_ms: int = 350
+    # Smart Turn can legitimately close a turn during a short hesitation.
+    # Do not send an activity_end for a sub-second fragment: callers often
+    # pause between words, and immediately opening another activity causes
+    # Gemini to cancel the pending response before it has produced audio.
+    min_turn_duration_ms: int = 450
     force_end_silence_ms: int = 1_400
     level_log_interval_seconds: float = 1.0
 
@@ -107,6 +112,7 @@ class LocalTurnDetector:
         self.previous_vad_state = VADState.QUIET
         self.turn_open = False
         self.bot_speaking = False
+        self.turn_started_at: float | None = None
         self.silence_started_at: float | None = None
         self.last_smart_turn_check = 0.0
 
@@ -151,6 +157,7 @@ class LocalTurnDetector:
         # decision, including the first consonant/syllable.
         if not self.turn_open and vad_state == self.VADState.SPEAKING:
             self.turn_open = True
+            self.turn_started_at = now
             self.silence_started_at = None
             decision.speech_started = True
             decision.interrupted_bot = self.bot_speaking
@@ -192,7 +199,15 @@ class LocalTurnDetector:
             ):
                 should_check = True
 
-            if smart_append_state == self.EndOfTurnState.COMPLETE:
+            turn_age_ms = (
+                (now - self.turn_started_at) * 1000
+                if self.turn_started_at is not None
+                else 0.0
+            )
+            if (
+                smart_append_state == self.EndOfTurnState.COMPLETE
+                and turn_age_ms >= self.config.min_turn_duration_ms
+            ):
                 decision.smart_turn_state = "TIMEOUT_COMPLETE"
                 self._close_turn(decision, reason="smart_turn_timeout")
             elif should_check:
@@ -215,7 +230,10 @@ class LocalTurnDetector:
                         else None
                     ),
                 )
-                if state == self.EndOfTurnState.COMPLETE:
+                if (
+                    state == self.EndOfTurnState.COMPLETE
+                    and turn_age_ms >= self.config.min_turn_duration_ms
+                ):
                     self._close_turn(decision, reason="smart_turn_complete")
                 elif self.silence_started_at is not None:
                     silence_ms = (now - self.silence_started_at) * 1000
@@ -285,6 +303,7 @@ class LocalTurnDetector:
             silence_ms=silence_ms,
         )
         self.silence_started_at = None
+        self.turn_started_at = None
         self.last_smart_turn_check = 0.0
 
     async def close(self) -> None:
