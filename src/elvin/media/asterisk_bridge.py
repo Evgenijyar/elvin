@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
@@ -172,7 +173,17 @@ class AsteriskGeminiBridge:
         self._output_buffer_lock = asyncio.Lock()
         self._last_echo_event_at = 0.0
         self._last_output_submission_at = 0.0
+        self._last_output_submission_generation: int | None = None
         self._active_activity_started = False
+        # If the caller speaks while Gemini is still preparing a response,
+        # starting another Live activity immediately can cancel both turns.
+        # Keep the completed caller utterance here and submit it only after
+        # the current server turn is complete.
+        self._pending_turn_audio: bytearray | None = None
+        self._pending_turns: deque[bytes] = deque()
+        self._pending_turn_drain_task: asyncio.Task[None] | None = None
+        self._pending_drain_active = False
+        self._pending_drain_audio: bytes | None = None
 
     async def run(self) -> str:
         self.call.media_attached = True
@@ -207,6 +218,13 @@ class AsteriskGeminiBridge:
             return result
         finally:
             self._closed = True
+            if self._pending_turn_drain_task is not None:
+                self._pending_turn_drain_task.cancel()
+                await asyncio.gather(
+                    self._pending_turn_drain_task,
+                    return_exceptions=True,
+                )
+                self._pending_turn_drain_task = None
             for task in tasks:
                 if not task.done():
                     task.cancel()
@@ -293,16 +311,45 @@ class AsteriskGeminiBridge:
                         "response_open_generation",
                         None,
                     )
-                    # A caller who starts speaking while Gemini is preparing
-                    # its first audio packet must interrupt that response too.
-                    # Waiting for turn_complete here lets the old response
-                    # start underneath the caller's speech and creates an
-                    # audible overlap at the turn boundary.
-                    should_interrupt = (
+                    response_audio_active = (
                         decision.interrupted_bot
-                        or response_open_generation is not None
+                        or self.call.detector.bot_speaking
+                        or self.call.gemini.bot_audio_active.is_set()
                     )
-                    if should_interrupt:
+                    # A queued turn may be waiting for the previous response
+                    # to finish. If that response starts speaking while the
+                    # caller is still talking, turn it into a real barge-in:
+                    # cancel the sender, flush the far end, and preserve the
+                    # caller's already buffered pre-roll.
+                    pending_prefix = b""
+                    if response_audio_active and self._pending_drain_active:
+                        await self._cancel_pending_drain()
+                    if response_audio_active:
+                        self._discard_pending_turns()
+                    if response_audio_active and self._pending_turn_audio is not None:
+                        pending_prefix = bytes(self._pending_turn_audio)
+                        self._pending_turn_audio = None
+
+                    if (
+                        response_open_generation is not None
+                        and not response_audio_active
+                    ) or (
+                        self._pending_drain_active
+                        and not response_audio_active
+                    ) or (
+                        self._active_activity_started
+                        and not response_audio_active
+                    ):
+                        # The model has not started speaking yet. Queue this
+                        # utterance instead of opening a competing activity;
+                        # otherwise Gemini can cancel both the pending old
+                        # response and this new one.
+                        self._pending_turn_audio = bytearray()
+                        self.call.timeline.add(
+                            "PENDING_TURN_STARTED",
+                            waiting_for_generation=response_open_generation,
+                        )
+                    elif response_audio_active:
                         cleared = self.call.gemini.clear_output_nowait()
                         # Advance Gemini's generation before flushing Asterisk
                         # so an output chunk that was already dequeued cannot
@@ -322,22 +369,165 @@ class AsteriskGeminiBridge:
                                 else "pending_response"
                             ),
                         )
+                        if pending_prefix:
+                            await self._send_audio_to_gemini(pending_prefix)
                     else:
                         await self.call.gemini.start_activity()
                         self._active_activity_started = True
+                        if pending_prefix:
+                            await self._send_audio_to_gemini(pending_prefix)
 
                 if decision.audio_to_gemini:
-                    if self._active_activity_started:
-                        await self.call.gemini.send_audio(
+                    if self._pending_turn_audio is not None:
+                        self._pending_turn_audio.extend(
+                            decision.audio_to_gemini
+                        )
+                    elif self._active_activity_started:
+                        await self._send_audio_to_gemini(
                             decision.audio_to_gemini
                         )
 
                 if decision.speech_ended:
-                    if self._active_activity_started:
+                    if self._pending_turn_audio is not None:
+                        pending_audio = bytes(self._pending_turn_audio)
+                        self._pending_turn_audio = None
+                        if pending_audio:
+                            self._pending_turns.append(pending_audio)
+                            self.call.timeline.add(
+                                "PENDING_TURN_QUEUED",
+                                bytes=len(pending_audio),
+                                queue_size=len(self._pending_turns),
+                            )
+                            self._schedule_pending_turn_drain()
+                    elif self._active_activity_started:
                         await self.call.gemini.end_activity()
                         self._active_activity_started = False
         except WebSocketDisconnect:
             return "caller_hangup"
+
+    def _schedule_pending_turn_drain(self) -> None:
+        task = self._pending_turn_drain_task
+        if task is None or task.done():
+            self._pending_turn_drain_task = asyncio.create_task(
+                self._drain_pending_turns(),
+                name=f"asterisk-pending-turns-{self.call.identity.call_id}",
+            )
+
+    async def _cancel_pending_drain(self) -> None:
+        task = self._pending_turn_drain_task
+        if task is None or task.done():
+            return
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        if self._pending_turn_drain_task is task:
+            self._pending_turn_drain_task = None
+
+    def _discard_pending_turns(self) -> None:
+        dropped = len(self._pending_turns)
+        self._pending_turns.clear()
+        if dropped:
+            self.call.timeline.add(
+                "PENDING_TURNS_DROPPED",
+                count=dropped,
+                reason="caller_barge_in",
+            )
+
+    async def _send_audio_to_gemini(self, pcm16: bytes) -> None:
+        """Send input in 20–40 ms chunks, including buffered pre-roll."""
+        if not pcm16:
+            return
+        # 40 ms at 16 kHz, mono, signed 16-bit PCM.
+        chunk_bytes = 1_280
+        for offset in range(0, len(pcm16), chunk_bytes):
+            await self.call.gemini.send_audio(
+                pcm16[offset : offset + chunk_bytes]
+            )
+
+    async def _drain_pending_turns(self) -> None:
+        while self._pending_turns and not self._closed:
+            pending_audio = self._pending_turns.popleft()
+            self._pending_drain_active = True
+            self._pending_drain_audio = pending_audio
+            sent = False
+            activity_started = False
+            try:
+                try:
+                    await self.call.gemini.wait_for_response_idle(timeout=12.0)
+                except TimeoutError:
+                    # A response that never reaches turnComplete must not
+                    # block every later caller turn forever. Advance the
+                    # generation once, explicitly, and let Gemini's normal
+                    # interruption protocol recover the session.
+                    self.call.timeline.add(
+                        "GEMINI_RESPONSE_WAIT_TIMEOUT",
+                        generation=getattr(
+                            self.call.gemini,
+                            "response_open_generation",
+                            None,
+                        ),
+                    )
+                # Let the playback monitor finish a just-completed response
+                # before the queued caller turn opens.
+                deadline = asyncio.get_running_loop().time() + 2.0
+                while (
+                    self.call.detector.bot_speaking
+                    and asyncio.get_running_loop().time() < deadline
+                ):
+                    await asyncio.sleep(0.02)
+                if self.call.detector.bot_speaking:
+                    cleared = self.call.gemini.clear_output_nowait()
+                    await self.protocol.command("FLUSH_MEDIA")
+                    self.echo_guard.clear()
+                    self.call.detector.set_bot_speaking(False)
+                    self.call.timeline.add(
+                        "PENDING_TURN_FLUSH",
+                        cleared_gemini_packets=cleared,
+                    )
+                self.resampler.reset()
+                await self._discard_output_buffer()
+                await self.call.gemini.start_activity()
+                activity_started = True
+                await self._send_audio_to_gemini(pending_audio)
+                await self.call.gemini.end_activity()
+                activity_started = False
+                sent = True
+                self.call.timeline.add(
+                    "PENDING_TURN_SENT",
+                    bytes=len(pending_audio),
+                    remaining=len(self._pending_turns),
+                )
+            except asyncio.CancelledError:
+                if not sent:
+                    self._pending_turns.appendleft(pending_audio)
+                if activity_started:
+                    try:
+                        await asyncio.shield(self.call.gemini.end_activity())
+                    except Exception:
+                        logger.debug(
+                            "Unable to close cancelled pending activity",
+                            exc_info=True,
+                        )
+                raise
+            except Exception as exc:
+                if not sent:
+                    self._pending_turns.appendleft(pending_audio)
+                if activity_started:
+                    try:
+                        await self.call.gemini.end_activity()
+                    except Exception:
+                        logger.debug(
+                            "Unable to close failed pending activity",
+                            exc_info=True,
+                        )
+                self.call.timeline.add(
+                    "PENDING_TURN_ERROR",
+                    error=f"{type(exc).__name__}: {exc}",
+                    queue_size=len(self._pending_turns),
+                )
+                await asyncio.sleep(0.25)
+            finally:
+                self._pending_drain_audio = None
+                self._pending_drain_active = False
 
     async def _output_loop(self) -> None:
         while True:
@@ -432,7 +622,10 @@ class AsteriskGeminiBridge:
         loop = asyncio.get_running_loop()
         sent_at = loop.time()
         previous_sent_at = getattr(self, "_last_output_submission_at", 0.0)
-        if previous_sent_at:
+        previous_generation = getattr(
+            self, "_last_output_submission_generation", None
+        )
+        if previous_sent_at and previous_generation == generation:
             actual_gap_ms = (sent_at - previous_sent_at) * 1000.0
             if actual_gap_ms >= 100.0:
                 self.call.timeline.add(
@@ -442,6 +635,9 @@ class AsteriskGeminiBridge:
                     bytes=len(chunk),
                 )
         self._last_output_submission_at = sent_at
+        self._last_output_submission_generation = (
+            self.call.gemini.generation
+        )
 
     async def _discard_output_buffer(self) -> None:
         async with self._output_buffer_lock:

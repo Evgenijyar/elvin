@@ -1,4 +1,5 @@
 import asyncio
+from collections import deque
 from types import SimpleNamespace
 
 from elvin.media.asterisk_bridge import (
@@ -100,3 +101,63 @@ def test_protocol_accepts_json_and_legacy_events() -> None:
     )
     assert legacy["event"] == "MEDIA_START"
     assert legacy["optimal_frame_size"] == "640"
+
+
+def test_pending_turn_is_serialized_and_chunked() -> None:
+    sent_to_gemini: list[bytes] = []
+    activity_calls: list[str] = []
+
+    class _FakeGemini:
+        response_open_generation = 7
+        generation = 7
+
+        async def wait_for_response_idle(self, *, timeout: float) -> None:
+            assert timeout == 12.0
+            self.response_open_generation = None
+
+        async def start_activity(self) -> None:
+            activity_calls.append("start")
+            self.generation += 1
+
+        async def send_audio(self, pcm: bytes) -> None:
+            sent_to_gemini.append(pcm)
+
+        async def end_activity(self) -> None:
+            activity_calls.append("end")
+
+    timeline = _FakeTimeline()
+    gemini = _FakeGemini()
+    bridge = object.__new__(AsteriskGeminiBridge)
+    bridge.call = SimpleNamespace(
+        gemini=gemini,
+        timeline=timeline,
+        detector=SimpleNamespace(
+            bot_speaking=False,
+            set_bot_speaking=lambda _value: None,
+        ),
+    )
+    bridge.protocol = SimpleNamespace(
+        command=_async_noop,
+    )
+    bridge.echo_guard = SimpleNamespace(clear=lambda: None)
+    bridge.resampler = SimpleNamespace(reset=lambda: None)
+    bridge._output_buffer = bytearray()
+    bridge._output_buffer_lock = asyncio.Lock()
+    bridge._pending_turns = deque([b"x" * 3_000])
+    bridge._closed = False
+    bridge._pending_drain_active = False
+    bridge._pending_drain_audio = None
+
+    async def exercise() -> None:
+        await bridge._drain_pending_turns()
+
+    asyncio.run(exercise())
+
+    assert activity_calls == ["start", "end"]
+    assert [len(chunk) for chunk in sent_to_gemini] == [1280, 1280, 440]
+    assert bridge._pending_turns == deque()
+    assert any(name == "PENDING_TURN_SENT" for name, _ in timeline.events)
+
+
+async def _async_noop(*_args: object, **_kwargs: object) -> None:
+    return None
