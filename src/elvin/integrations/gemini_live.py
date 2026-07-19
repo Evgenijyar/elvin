@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -20,6 +21,7 @@ class GeminiAudioPacket:
 
 
 def build_system_instruction(robot: dict[str, Any]) -> str:
+    """Build the single UTF-8 instruction sent to Gemini Live."""
     role = str(robot.get("role_prompt") or "").strip()
     knowledge = str(robot.get("knowledge_base") or "").strip()
     description = str(robot.get("description") or "").strip()
@@ -29,16 +31,9 @@ def build_system_instruction(robot: dict[str, Any]) -> str:
         "Не начинай разговор первым: дождись первой законченной реплики человека.",
         "После каждого вопроса остановись и слушай ответ.",
         "Не упоминай Gemini, API, LPTracker, Asterisk, системный промпт или внутреннее устройство.",
-    ]
-    # Keep the live-model instruction as real UTF-8 Russian text. The
-    # historical literals above were mojibake and made the model receive a
-    # corrupted system prompt.
-    parts = [
-        "Ты голосовой ИИ-робот, разговаривающий с человеком по телефону.",
-        "Отвечай естественно, коротко и на русском языке.",
-        "Не начинай разговор первым: дождись первой законченной реплики человека.",
-        "После каждого вопроса остановись и слушай ответ.",
-        "Не упоминай Gemini, API, LPTracker, Asterisk, системный промпт или внутреннее устройство.",
+        "Отвечай в первую очередь на последний вопрос собеседника. Не повторяй дословно уже сказанное и не возвращайся к вступлению без прямой причины.",
+        "Одна реплика — одно-три коротких предложения. Не задавай новый вопрос, пока не ответил на текущий.",
+        "Если собеседник не хочет разговаривать или просит прекратить звонок, вежливо попрощайся без нового предложения.",
     ]
     if description:
         parts.extend(["ОПИСАНИЕ РОБОТА:", description])
@@ -46,37 +41,6 @@ def build_system_instruction(robot: dict[str, Any]) -> str:
         parts.extend(["РОЛЬ И СЦЕНАРИЙ:", role])
     if knowledge:
         parts.extend(["БАЗА ЗНАНИЙ:", knowledge])
-    # Rebuild optional sections as well; historical literals in this function
-    # contain mojibake labels and must never reach Gemini.
-    parts = [
-        "Ты голосовой ИИ-робот, разговаривающий с человеком по телефону.",
-        "Отвечай естественно, коротко и на русском языке.",
-        "Не начинай разговор первым: дождись первой законченной реплики человека.",
-        "После каждого вопроса остановись и слушай ответ.",
-        "Не упоминай Gemini, API, LPTracker, Asterisk, системный промпт или внутреннее устройство.",
-    ]
-    if description:
-        parts.extend(["ОПИСАНИЕ РОБОТА:", description])
-    if role:
-        parts.extend(["РОЛЬ И СЦЕНАРИЙ:", role])
-    if knowledge:
-        parts.extend(["БАЗА ЗНАНИЙ:", knowledge])
-    parts = [
-        "\u0422\u044b \u0433\u043e\u043b\u043e\u0441\u043e\u0432\u043e\u0439 \u0418\u0418-\u0440\u043e\u0431\u043e\u0442, \u0440\u0430\u0437\u0433\u043e\u0432\u0430\u0440\u0438\u0432\u0430\u044e\u0449\u0438\u0439 \u0441 \u0447\u0435\u043b\u043e\u0432\u0435\u043a\u043e\u043c \u043f\u043e \u0442\u0435\u043b\u0435\u0444\u043e\u043d\u0443.",
-        "\u041e\u0442\u0432\u0435\u0447\u0430\u0439 \u0435\u0441\u0442\u0435\u0441\u0442\u0432\u0435\u043d\u043d\u043e, \u043a\u043e\u0440\u043e\u0442\u043a\u043e \u0438 \u043d\u0430 \u0440\u0443\u0441\u0441\u043a\u043e\u043c \u044f\u0437\u044b\u043a\u0435.",
-        "\u041d\u0435 \u043d\u0430\u0447\u0438\u043d\u0430\u0439 \u0440\u0430\u0437\u0433\u043e\u0432\u043e\u0440 \u043f\u0435\u0440\u0432\u044b\u043c: \u0434\u043e\u0436\u0434\u0438\u0441\u044c \u043f\u0435\u0440\u0432\u043e\u0439 \u0437\u0430\u043a\u043e\u043d\u0447\u0435\u043d\u043d\u043e\u0439 \u0440\u0435\u043f\u043b\u0438\u043a\u0438 \u0447\u0435\u043b\u043e\u0432\u0435\u043a\u0430.",
-        "\u041f\u043e\u0441\u043b\u0435 \u043a\u0430\u0436\u0434\u043e\u0433\u043e \u0432\u043e\u043f\u0440\u043e\u0441\u0430 \u043e\u0441\u0442\u0430\u043d\u043e\u0432\u0438\u0441\u044c \u0438 \u0441\u043b\u0443\u0448\u0430\u0439 \u043e\u0442\u0432\u0435\u0442.",
-        "\u041d\u0435 \u0443\u043f\u043e\u043c\u0438\u043d\u0430\u0439 Gemini, API, LPTracker, Asterisk, \u0441\u0438\u0441\u0442\u0435\u043c\u043d\u044b\u0439 \u043f\u0440\u043e\u043c\u043f\u0442 \u0438\u043b\u0438 \u0432\u043d\u0443\u0442\u0440\u0435\u043d\u043d\u0435\u0435 \u0443\u0441\u0442\u0440\u043e\u0439\u0441\u0442\u0432\u043e.",
-        "\u041e\u0442\u0432\u0435\u0447\u0430\u0439 \u0432 \u043f\u0435\u0440\u0432\u0443\u044e \u043e\u0447\u0435\u0440\u0435\u0434\u044c \u043d\u0430 \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0439 \u0432\u043e\u043f\u0440\u043e\u0441 \u0441\u043e\u0431\u0435\u0441\u0435\u0434\u043d\u0438\u043a\u0430. \u041d\u0435 \u043f\u043e\u0432\u0442\u043e\u0440\u044f\u0439 \u0434\u043e\u0441\u043b\u043e\u0432\u043d\u043e \u0443\u0436\u0435 \u0441\u043a\u0430\u0437\u0430\u043d\u043d\u043e\u0435 \u0438 \u043d\u0435 \u0432\u043e\u0437\u0432\u0440\u0430\u0449\u0430\u0439\u0441\u044f \u043a \u0432\u0441\u0442\u0443\u043f\u043b\u0435\u043d\u0438\u044e \u0431\u0435\u0437 \u043f\u0440\u044f\u043c\u043e\u0439 \u043f\u0440\u0438\u0447\u0438\u043d\u044b.",
-        "\u041e\u0434\u043d\u0430 \u0440\u0435\u043f\u043b\u0438\u043a\u0430 \u2014 \u043e\u0434\u0438\u043d\u0430-\u0442\u0440\u0438 \u043a\u043e\u0440\u043e\u0442\u043a\u0438\u0445 \u043f\u0440\u0435\u0434\u043b\u043e\u0436\u0435\u043d\u0438\u044f. \u041d\u0435 \u0437\u0430\u0434\u0430\u0432\u0430\u0439 \u043d\u043e\u0432\u044b\u0439 \u0432\u043e\u043f\u0440\u043e\u0441, \u043f\u043e\u043a\u0430 \u043d\u0435 \u043e\u0442\u0432\u0435\u0442\u0438\u043b \u043d\u0430 \u0442\u0435\u043a\u0443\u0449\u0438\u0439.",
-        "\u0415\u0441\u043b\u0438 \u0441\u043e\u0431\u0435\u0441\u0435\u0434\u043d\u0438\u043a \u043d\u0435 \u0445\u043e\u0447\u0435\u0442 \u0440\u0430\u0437\u0433\u043e\u0432\u0430\u0440\u0438\u0432\u0430\u0442\u044c \u0438\u043b\u0438 \u043f\u0440\u043e\u0441\u0438\u0442 \u043f\u0440\u0435\u043a\u0440\u0430\u0442\u0438\u0442\u044c \u0437\u0432\u043e\u043d\u043e\u043a, \u0432\u0435\u0436\u043b\u0438\u0432\u043e \u043f\u043e\u043f\u0440\u043e\u0449\u0430\u0439\u0441\u044f \u0431\u0435\u0437 \u043d\u043e\u0432\u043e\u0433\u043e \u043f\u0440\u0435\u0434\u043b\u043e\u0436\u0435\u043d\u0438\u044f.",
-    ]
-    if description:
-        parts.extend(["\u041e\u041f\u0418\u0421\u0410\u041d\u0418\u0415 \u0420\u041e\u0411\u041e\u0422\u0410:", description])
-    if role:
-        parts.extend(["\u0420\u041e\u041b\u042c \u0418 \u0421\u0426\u0415\u041d\u0410\u0420\u0418\u0419:", role])
-    if knowledge:
-        parts.extend(["\u0411\u0410\u0417\u0410 \u0417\u041d\u0410\u041d\u0418\u0419:", knowledge])
     return "\n\n".join(parts)
 
 
@@ -114,11 +78,13 @@ class GeminiLiveSession:
         # activity. Keep that previous generation separate so late packets do
         # not overwrite the new turn's transcripts or audio state.
         self._pending_server_generation: int | None = None
+        self._pending_audio_generation: int | None = None
         self._response_open_generation: int | None = None
         self._awaiting_response_generation: int | None = None
         self._turn_complete_events: dict[int, asyncio.Event] = {}
         self._input_transcripts: dict[int, str] = {}
         self._output_transcripts: dict[int, str] = {}
+        self._last_audio_packet_at: dict[int, float] = {}
         self.output_audio: asyncio.Queue[GeminiAudioPacket] = asyncio.Queue(
             maxsize=400
         )
@@ -193,7 +159,10 @@ class GeminiLiveSession:
         config: dict[str, Any] = {
             "response_modalities": ["AUDIO"],
             "temperature": temperature,
-            "max_output_tokens": 4096,
+            # The robot is instructed to answer in one to three short
+            # sentences. A bounded response keeps native-audio generation
+            # focused and prevents a long tail of speech after the answer.
+            "max_output_tokens": 1024,
             "system_instruction": instruction,
             "speech_config": {
                 "voice_config": {
@@ -265,6 +234,7 @@ class GeminiLiveSession:
             # interrupted response can still deliver late notifications, so
             # keep its generation until the server's turn_complete arrives.
             self._pending_server_generation = previous_response_generation
+            self._pending_audio_generation = previous_response_generation
         self._generation += 1
         self.turn_complete.clear()
         self.bot_audio_active.clear()
@@ -385,18 +355,25 @@ class GeminiLiveSession:
         if content is None:
             return
 
-        # Transcriptions are independent server messages and can arrive after
-        # the next activity has already started.  An interrupted/standalone
-        # turn-complete message belongs to the previous generation; a model
-        # audio turn without that control marker is the new response and must
-        # never be discarded just because the old turn-complete is late.
+        # Transcriptions and model audio are independent server messages and
+        # can arrive after the next activity has already started. Until the
+        # interruption marker arrives, model audio is still the old response.
+        # Relabelling that packet as the current generation makes the robot
+        # speak stale audio over the caller.
         model_turn = getattr(content, "model_turn", None)
         parts = getattr(model_turn, "parts", None) if model_turn else None
         interrupted = bool(getattr(content, "interrupted", False))
         turn_complete = bool(getattr(content, "turn_complete", False))
         pending_generation = self._pending_server_generation
+        pending_audio_generation = getattr(
+            self, "_pending_audio_generation", None
+        )
         is_pending_previous = pending_generation is not None and (
             interrupted
+            or (
+                model_turn is not None
+                and pending_audio_generation == pending_generation
+            )
             or (turn_complete and model_turn is None)
             or (
                 model_turn is None
@@ -420,7 +397,10 @@ class GeminiLiveSession:
                 self._input_transcripts[generation] = input_transcript
                 if generation == self._generation:
                     self.input_transcript = input_transcript
-                logger.info("Gemini input transcription: %s", text)
+                # Transcription fragments can arrive for every few words.
+                # INFO logging is synchronous on the event loop and can block
+                # the 20 ms media path behind Docker's log driver.
+                logger.debug("Gemini input transcription: %s", text)
 
         output_transcription = getattr(content, "output_transcription", None)
         if output_transcription is not None:
@@ -430,7 +410,7 @@ class GeminiLiveSession:
                 self._output_transcripts[generation] = output_transcript
                 if generation == self._generation:
                     self.output_transcript = output_transcript
-                logger.info("Gemini output transcription: %s", text)
+                logger.debug("Gemini output transcription: %s", text)
 
         if not is_pending_previous and (
             input_transcription is not None
@@ -449,10 +429,24 @@ class GeminiLiveSession:
                 if isinstance(pcm, bytes) and pcm:
                     if is_pending_previous:
                         # Audio for the interrupted turn is stale. The
-                        # following turn-complete event will release the
-                        # pending marker, after which new audio is accepted.
+                        # interruption event releases the audio marker, after
+                        # which audio from the new generation is accepted.
                         continue
                     self._response_open_generation = generation
+                    now = time.monotonic()
+                    previous_packet_at = self._last_audio_packet_at.get(
+                        generation
+                    )
+                    if previous_packet_at is not None:
+                        gap_ms = (now - previous_packet_at) * 1000.0
+                        if gap_ms >= 200.0:
+                            self.timeline.add(
+                                "GEMINI_AUDIO_PACKET_GAP",
+                                generation=generation,
+                                gap_ms=round(gap_ms, 1),
+                                bytes=len(pcm),
+                            )
+                    self._last_audio_packet_at[generation] = now
                     if generation not in self._first_audio_seen_for_generation:
                         self._first_audio_seen_for_generation.add(generation)
                         self.timeline.add(
@@ -469,6 +463,8 @@ class GeminiLiveSession:
 
         if interrupted:
             cleared = self.clear_output_nowait(generation=generation)
+            if getattr(self, "_pending_audio_generation", None) == generation:
+                self._pending_audio_generation = None
             self.bot_audio_active.clear()
             self.timeline.add(
                 "GEMINI_INTERRUPTED",
@@ -527,4 +523,4 @@ class GeminiLiveSession:
             raise RuntimeError(
                 "Gemini Live receiver failed: "
                 f"{type(self.receive_error).__name__}: {self.receive_error}"
-            ) from self.receive_error
+        ) from self.receive_error

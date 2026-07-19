@@ -135,8 +135,9 @@ class Settings(BaseSettings):
     vad_stop_seconds: float = Field(default=0.20, ge=0.04, le=2.0, validation_alias="ELVIN_VAD_STOP_SECONDS")
     vad_min_volume: float = Field(default=0.03, ge=0.0, le=1.0, validation_alias="ELVIN_VAD_MIN_VOLUME")
     pre_roll_ms: int = Field(default=240, ge=80, le=1000, validation_alias="ELVIN_PRE_ROLL_MS")
-    smart_turn_retry_ms: int = Field(default=350, ge=100, le=2000, validation_alias="ELVIN_SMART_TURN_RETRY_MS")
-    force_end_silence_ms: int = Field(default=1400, ge=400, le=5000, validation_alias="ELVIN_FORCE_END_SILENCE_MS")
+    smart_turn_retry_ms: int = Field(default=200, ge=100, le=2000, validation_alias="ELVIN_SMART_TURN_RETRY_MS")
+    turn_merge_grace_ms: int = Field(default=300, ge=100, le=1200, validation_alias="ELVIN_TURN_MERGE_GRACE_MS")
+    force_end_silence_ms: int = Field(default=900, ge=500, le=5000, validation_alias="ELVIN_FORCE_END_SILENCE_MS")
     pcm_level_log_interval_seconds: float = Field(default=1.0, ge=0.2, le=10.0, validation_alias="ELVIN_PCM_LEVEL_LOG_INTERVAL_SECONDS")
 
     @property

@@ -42,8 +42,13 @@ def _bridge() -> tuple[AsteriskGeminiBridge, _FakeWebSocket, _FakeTimeline]:
     # protocol object tiny makes this test independent of FastAPI/Starlette.
     sent: list[bytes] = []
 
-    async def send_media(pcm: bytes) -> None:
+    async def send_media(
+        pcm: bytes,
+        *,
+        generation: int | None = None,
+    ) -> bool:
         sent.append(pcm)
+        return True
 
     protocol.send_media = send_media
     call = SimpleNamespace(

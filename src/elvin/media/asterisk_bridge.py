@@ -72,15 +72,34 @@ class AsteriskProtocol:
         async with self.send_lock:
             await self.websocket.send_text(message)
 
-    async def send_media(self, pcm: bytes) -> None:
+    async def send_media(
+        self,
+        pcm: bytes,
+        *,
+        generation: int | None = None,
+    ) -> bool:
         if not pcm:
-            return
-        await self.media_allowed.wait()
+            return False
         # Asterisk's underlying websocket layer rejects messages > 65500.
         for offset in range(0, len(pcm), 64_000):
             chunk = pcm[offset : offset + 64_000]
+            await self.media_allowed.wait()
+            # A barge-in can happen while MEDIA_XOFF is active. Re-check the
+            # generation after the wait so stale audio is never released into
+            # the channel after FLUSH_MEDIA.
+            if (
+                generation is not None
+                and generation != self.call.gemini.generation
+            ):
+                return False
             async with self.send_lock:
+                if (
+                    generation is not None
+                    and generation != self.call.gemini.generation
+                ):
+                    return False
                 await self.websocket.send_bytes(chunk)
+        return True
 
     async def mark(self, correlation_id: str) -> asyncio.Event:
         event = asyncio.Event()
@@ -152,9 +171,7 @@ class AsteriskGeminiBridge:
         self._output_buffer = bytearray()
         self._output_buffer_lock = asyncio.Lock()
         self._last_echo_event_at = 0.0
-        self._next_output_send_at = 0.0
-        self._last_output_frame_sent_at = 0.0
-        self._output_frame_index = 0
+        self._last_output_submission_at = 0.0
         self._active_activity_started = False
 
     async def run(self) -> str:
@@ -293,8 +310,7 @@ class AsteriskGeminiBridge:
                         await self.call.gemini.start_activity()
                         await self.protocol.command("FLUSH_MEDIA")
                         self.echo_guard.clear()
-                        self._next_output_send_at = 0.0
-                        self._last_output_frame_sent_at = 0.0
+                        self._last_output_submission_at = 0.0
                         self.call.detector.set_bot_speaking(False)
                         self._active_activity_started = True
                         self.call.timeline.add(
@@ -391,76 +407,41 @@ class AsteriskGeminiBridge:
                 return
             chunk = bytes(self._output_buffer[:send_size])
             del self._output_buffer[:send_size]
-            self.call.detector.set_bot_speaking(True)
-            if self.call.gemini.generation not in self._first_output_generation:
-                self._first_output_generation.add(self.call.gemini.generation)
+        # chan_websocket owns the real-time clock and automatically generates
+        # silence when the application has no packet to send. Sending a
+        # complete-frame batch immediately lets Asterisk keep a small remote
+        # jitter buffer, avoids event-loop timer drift, and still preserves
+        # barge-in because FLUSH_MEDIA clears that remote buffer.
+        if generation is not None and generation != self.call.gemini.generation:
+            return
+        sent = await self.protocol.send_media(chunk, generation=generation)
+        if not sent:
+            return
+        self.call.detector.set_bot_speaking(True)
+        if self.call.gemini.generation not in self._first_output_generation:
+            self._first_output_generation.add(self.call.gemini.generation)
+            self.call.timeline.add(
+                "ASTERISK_FIRST_AUDIO_SENT",
+                generation=self.call.gemini.generation,
+                bytes=len(chunk),
+            )
+        self.call.bot_audio.submit(chunk)
+        echo_guard = getattr(self, "echo_guard", None)
+        if echo_guard is not None:
+            echo_guard.note_playback(chunk)
+        loop = asyncio.get_running_loop()
+        sent_at = loop.time()
+        previous_sent_at = getattr(self, "_last_output_submission_at", 0.0)
+        if previous_sent_at:
+            actual_gap_ms = (sent_at - previous_sent_at) * 1000.0
+            if actual_gap_ms >= 100.0:
                 self.call.timeline.add(
-                    "ASTERISK_FIRST_AUDIO_SENT",
-                    generation=self.call.gemini.generation,
+                    "ASTERISK_OUTPUT_UNDERRUN",
+                    generation=generation,
+                    actual_ms=round(actual_gap_ms, 1),
                     bytes=len(chunk),
                 )
-        # Gemini emits audio as quickly as it can generate it. Asterisk's
-        # websocket channel, however, plays one ptime-sized frame every
-        # ptime milliseconds. Sending a whole response immediately creates a
-        # multi-second queue (MEDIA_XOFF), so after a barge-in the caller keeps
-        # hearing stale audio. Pace each exact frame at the channel's real-time
-        # rate and re-check the generation between frames.
-        frame_size = max(2, int(self.protocol.info.optimal_frame_size or 640))
-        frame_size -= frame_size % 2
-        ptime_seconds = max(
-            0.005, float(self.protocol.info.ptime or 20) / 1000.0
-        )
-        next_output_send_at = getattr(self, "_next_output_send_at", 0.0)
-        loop = asyncio.get_running_loop()
-        for offset in range(0, len(chunk), frame_size):
-            if generation is not None and generation != self.call.gemini.generation:
-                return
-            frame = chunk[offset : offset + frame_size]
-            if len(frame) < frame_size:
-                frame += b"\x00" * (frame_size - len(frame))
-            now = loop.time()
-            if next_output_send_at > now:
-                await asyncio.sleep(next_output_send_at - now)
-            if generation is not None and generation != self.call.gemini.generation:
-                return
-            frame_deadline = max(next_output_send_at, loop.time())
-            send_started_at = loop.time()
-            await self.protocol.send_media(frame)
-            sent_at = loop.time()
-            self.call.bot_audio.submit(frame)
-            echo_guard = getattr(self, "echo_guard", None)
-            if echo_guard is not None:
-                echo_guard.note_playback(frame)
-            self._output_frame_index = (
-                getattr(self, "_output_frame_index", 0) + 1
-            )
-            previous_sent_at = getattr(
-                self, "_last_output_frame_sent_at", 0.0
-            )
-            if previous_sent_at:
-                actual_gap_ms = (sent_at - previous_sent_at) * 1000.0
-                expected_gap_ms = ptime_seconds * 1000.0
-                if actual_gap_ms > max(expected_gap_ms * 1.75, expected_gap_ms + 25.0):
-                    self.call.timeline.add(
-                        "ASTERISK_OUTPUT_GAP",
-                        generation=generation,
-                        frame_index=self._output_frame_index,
-                        expected_ms=round(expected_gap_ms, 1),
-                        actual_ms=round(actual_gap_ms, 1),
-                        send_wait_ms=round(
-                            (sent_at - send_started_at) * 1000.0, 1
-                        ),
-                        bytes=len(frame),
-                    )
-            self._last_output_frame_sent_at = sent_at
-            # Never try to catch up with several frames at once after a delayed
-            # websocket send.  If one frame was late, allow at most the next
-            # frame to go immediately, then resume the normal ptime cadence.
-            next_output_send_at = max(
-                frame_deadline + ptime_seconds,
-                sent_at,
-            )
-            self._next_output_send_at = next_output_send_at
+        self._last_output_submission_at = sent_at
 
     async def _discard_output_buffer(self) -> None:
         async with self._output_buffer_lock:

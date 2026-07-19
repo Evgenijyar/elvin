@@ -60,6 +60,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
             vad_min_volume=app_settings.vad_min_volume,
             pre_roll_ms=app_settings.pre_roll_ms,
             smart_turn_retry_ms=app_settings.smart_turn_retry_ms,
+            turn_merge_grace_ms=app_settings.turn_merge_grace_ms,
             force_end_silence_ms=app_settings.force_end_silence_ms,
             level_log_interval_seconds=app_settings.pcm_level_log_interval_seconds,
         ),

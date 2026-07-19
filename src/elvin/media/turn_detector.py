@@ -32,15 +32,17 @@ class TurnDetectorConfig:
     vad_stop_secs: float = 0.20
     vad_min_volume: float = 0.03
     pre_roll_ms: int = 240
-    smart_turn_retry_ms: int = 350
+    smart_turn_retry_ms: int = 200
     # Smart Turn can legitimately close a turn during a short hesitation.
     # Do not send an activity_end for a sub-second fragment: callers often
     # pause between words, and immediately opening another activity causes
     # Gemini to cancel the pending response before it has produced audio.
     min_turn_duration_ms: int = 450
     # Give short hesitations a chance to merge into the current activity.
-    turn_merge_grace_ms: int = 600
-    force_end_silence_ms: int = 1_400
+    turn_merge_grace_ms: int = 300
+    # Gemini's manual-VAD guidance recommends at least 500 ms of silence.
+    # Keep a 900 ms hard guard while Smart Turn normally closes earlier.
+    force_end_silence_ms: int = 900
     level_log_interval_seconds: float = 1.0
 
 

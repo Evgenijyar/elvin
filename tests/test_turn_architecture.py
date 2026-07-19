@@ -20,7 +20,7 @@ def test_short_speech_fragments_are_not_closed_as_turns() -> None:
     text = Path("src/elvin/media/turn_detector.py").read_text(encoding="utf-8")
     assert "min_turn_duration_ms: int = 450" in text
     assert "turn_age_ms >= self.config.min_turn_duration_ms" in text
-    assert "turn_merge_grace_ms: int = 600" in text
+    assert "turn_merge_grace_ms: int = 300" in text
     assert "echo_suppressed" in text
 
 

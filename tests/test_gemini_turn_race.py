@@ -19,10 +19,12 @@ def _session_for_response_test() -> GeminiLiveSession:
     session._closed = False
     session._generation = 2
     session._pending_server_generation = 1
+    session._pending_audio_generation = 1
     session._response_open_generation = 1
     session._first_audio_seen_for_generation = set()
     session._input_transcripts = {1: "старый вопрос", 2: ""}
     session._output_transcripts = {1: "старый ответ", 2: ""}
+    session._last_audio_packet_at = {}
     session.output_audio = asyncio.Queue(maxsize=20)
     session.timeline = _Timeline()
     session.turn_complete = asyncio.Event()
@@ -80,6 +82,9 @@ def test_late_interrupted_turn_is_not_relabelled_as_current() -> None:
 
 def test_new_audio_is_not_dropped_when_old_turn_complete_is_late() -> None:
     session = _session_for_response_test()
+    # The interruption marker has already arrived; only the previous
+    # turn-complete notification is still pending.
+    session._pending_audio_generation = None
     current_audio = SimpleNamespace(
         inline_data=SimpleNamespace(data=b"current-audio")
     )
