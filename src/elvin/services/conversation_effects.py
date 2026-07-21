@@ -7,6 +7,7 @@ explicitly enables one or more effects in the UI.
 
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from typing import Any
 
@@ -169,6 +170,11 @@ def default_effects_config(*, enabled: bool = False) -> dict[str, dict[str, Any]
 
 def normalize_effects_config(value: Any) -> dict[str, dict[str, Any]]:
     """Return a complete, bounded and JSON-safe effect configuration."""
+    if isinstance(value, (str, bytes, bytearray)):
+        try:
+            value = json.loads(value)
+        except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+            value = {}
     source = value if isinstance(value, dict) else {}
     result = default_effects_config(enabled=False)
     for effect in EFFECT_CATALOG:

@@ -133,12 +133,7 @@ def test_postgres_list_robots_returns_saved_effect_profile(tmp_path: Path) -> No
                     "callback_condition": "",
                     "stop_list_condition": "",
                     "answering_machine_condition": "",
-                    "effects_config": {
-                        "natural_interruption": {
-                            "enabled": True,
-                            "release_ms": 410,
-                        }
-                    },
+                    "effects_config": '{"natural_interruption":{"enabled":true,"release_ms":410}}',
                     "active": True,
                     "created_at": datetime.now(UTC),
                     "updated_at": datetime.now(UTC),
