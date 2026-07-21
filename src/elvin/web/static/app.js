@@ -7,6 +7,8 @@ const state = {
     stages: new Map(),
     queues: new Map(),
     gemini: null,
+    effectsCatalog: null,
+    selectedEffectKey: null,
     activePage: "calls",
     activeProjectId: null,
     selectedRobotId: null,
@@ -85,6 +87,8 @@ function bindEvents() {
     $("#assignmentForm").addEventListener("submit", createAssignment);
     $("#geminiSettingsForm").addEventListener("submit", saveGeminiSettings);
     $("#testGeminiButton").addEventListener("click", testGeminiSettings);
+    $("#enableAllEffects").addEventListener("click", () => setAllEffects(true));
+    $("#disableAllEffects").addEventListener("click", () => setAllEffects(false));
     $$(".nav-button").forEach((button) => {
         button.addEventListener("click", () => switchPage(button.dataset.page));
     });
@@ -156,18 +160,20 @@ function startQueuePolling() {
 
 async function refreshAll() {
     try {
-        const [meta, projects, robots, dashboard, gemini] = await Promise.all([
+        const [meta, projects, robots, dashboard, gemini, effectsCatalog] = await Promise.all([
             api("/api/meta"),
             api("/api/projects"),
             api("/api/robots"),
             api("/api/dashboard"),
             api("/api/settings/gemini"),
+            api("/api/robots/effects/catalog"),
         ]);
         state.meta = meta;
         state.projects = projects.items || [];
         state.robots = robots.items || [];
         state.assignments = dashboard.items || [];
         state.gemini = gemini;
+        state.effectsCatalog = effectsCatalog;
         if (!state.activeProjectId && state.assignments.length) {
             state.activeProjectId = state.assignments[0].project_id;
         }
@@ -641,12 +647,131 @@ function renderRobotEditor() {
     $("#robotCallbackCondition").value = robot.callback_condition || "";
     $("#robotStopListCondition").value = robot.stop_list_condition || "";
     $("#robotAnsweringMachineCondition").value = robot.answering_machine_condition || "";
+    $("#robotActorApiKey").value = state.gemini?.actor_api_key || state.gemini?.api_key || "";
+    $("#robotDirectorApiKey").value = state.gemini?.director_api_key || "";
+    ensureRobotEffects(robot);
+    renderEffectsEditor();
     renderTemperature();
     const key = $("#geminiKeyStatus");
-    key.textContent = state.gemini?.configured
-        ? "✓ Gemini API key настроен"
-        : "Gemini API key ещё не настроен. Откройте раздел «Настройки».";
-    key.classList.toggle("ok", Boolean(state.gemini?.configured));
+    const actorReady = Boolean(state.gemini?.actor_configured ?? state.gemini?.configured);
+    const directorReady = Boolean(state.gemini?.director_configured);
+    key.textContent = actorReady && directorReady
+        ? "✓ Ключи «Актёр» и «Режиссёр» настроены"
+        : actorReady
+            ? "Ключ «Актёр» настроен. Для эффектов добавьте ключ «Режиссёр»."
+            : "Ключ «Актёр» ещё не настроен. Откройте раздел «Настройки».";
+    key.classList.toggle("ok", actorReady && directorReady);
+}
+
+function cloneEffectsDefaults() {
+    return JSON.parse(JSON.stringify(state.effectsCatalog?.defaults || {}));
+}
+
+function ensureRobotEffects(robot) {
+    const defaults = cloneEffectsDefaults();
+    const source = robot.effects_config && typeof robot.effects_config === "object"
+        ? robot.effects_config
+        : {};
+    Object.entries(defaults).forEach(([effectKey, defaultValues]) => {
+        defaults[effectKey] = { ...defaultValues, ...(source[effectKey] || {}) };
+    });
+    robot.effects_config = defaults;
+    const available = state.effectsCatalog?.effects || [];
+    if (!available.some((effect) => effect.key === state.selectedEffectKey)) {
+        state.selectedEffectKey = available[0]?.key || null;
+    }
+}
+
+function setAllEffects(enabled) {
+    const robot = selectedRobot();
+    if (!robot) return;
+    ensureRobotEffects(robot);
+    Object.values(robot.effects_config).forEach((effect) => { effect.enabled = enabled; });
+    renderEffectsEditor();
+}
+
+function renderEffectsEditor() {
+    const robot = selectedRobot();
+    const catalog = state.effectsCatalog?.effects || [];
+    const menu = $("#effectsMenu");
+    const settings = $("#effectSettings");
+    if (!robot || !catalog.length) {
+        menu.innerHTML = '<div class="muted">Каталог эффектов не загружен.</div>';
+        settings.innerHTML = "";
+        return;
+    }
+    ensureRobotEffects(robot);
+    menu.innerHTML = catalog.map((effect) => {
+        const enabled = Boolean(robot.effects_config[effect.key]?.enabled);
+        const active = effect.key === state.selectedEffectKey;
+        return `
+            <div class="effect-menu-row ${active ? "active" : ""} ${enabled ? "enabled" : ""}" data-effect-key="${escapeHtml(effect.key)}">
+                <input class="effect-enabled-toggle" type="checkbox" ${enabled ? "checked" : ""} aria-label="Включить ${escapeHtml(effect.label)}">
+                <button class="effect-select-button" type="button">
+                    <strong>${escapeHtml(effect.label)}</strong>
+                    <small>${enabled ? "Включён" : "Выключен"}</small>
+                </button>
+            </div>
+        `;
+    }).join("");
+    menu.querySelectorAll(".effect-menu-row").forEach((row) => {
+        const effectKey = row.dataset.effectKey;
+        row.querySelector(".effect-select-button").addEventListener("click", () => {
+            state.selectedEffectKey = effectKey;
+            renderEffectsEditor();
+        });
+        row.querySelector(".effect-enabled-toggle").addEventListener("change", (event) => {
+            robot.effects_config[effectKey].enabled = event.target.checked;
+            state.selectedEffectKey = effectKey;
+            renderEffectsEditor();
+        });
+    });
+
+    const effect = catalog.find((item) => item.key === state.selectedEffectKey) || catalog[0];
+    const values = robot.effects_config[effect.key];
+    settings.innerHTML = `
+        <div class="effect-settings-header">
+            <div>
+                <div class="eyebrow">НАСТРОЙКИ ЭФФЕКТА</div>
+                <h3>${escapeHtml(effect.label)}</h3>
+                <p>${escapeHtml(effect.description)}</p>
+            </div>
+            <span class="effect-state-badge ${values.enabled ? "on" : ""}">${values.enabled ? "Включён" : "Выключен"}</span>
+        </div>
+        <div class="effect-fields-grid">
+            ${effect.fields.map((field) => renderEffectField(effect.key, field, values[field.key])).join("")}
+        </div>
+        <div class="effect-safety-note">Изменения применятся после сохранения робота и только к новым звонкам. При выключенном эффекте его обработчик не участвует в аудиотракте.</div>
+    `;
+    settings.querySelectorAll("[data-effect-field]").forEach((input) => {
+        const fieldKey = input.dataset.effectField;
+        const field = effect.fields.find((item) => item.key === fieldKey);
+        const update = () => {
+            robot.effects_config[effect.key][fieldKey] = field.type === "number"
+                ? Number(input.value)
+                : input.value;
+        };
+        input.addEventListener(field.type === "number" ? "change" : "input", update);
+    });
+}
+
+function renderEffectField(effectKey, field, value) {
+    if (field.type === "text") {
+        return `
+            <label class="effect-field wide">
+                <span>${escapeHtml(field.label)}</span>
+                <textarea data-effect-field="${escapeHtml(field.key)}" rows="5">${escapeHtml(value ?? "")}</textarea>
+            </label>
+        `;
+    }
+    return `
+        <label class="effect-field">
+            <span>${escapeHtml(field.label)}</span>
+            <input data-effect-field="${escapeHtml(field.key)}" type="number"
+                   min="${field.min}" max="${field.max}" step="${field.step}" value="${Number(value ?? field.default)}">
+            <small>Диапазон: ${field.min}–${field.max}, шаг ${field.step}</small>
+        </label>
+    `;
 }
 
 function renderTemperature() {
@@ -672,6 +797,7 @@ async function createRobot() {
                 callback_condition: "",
                 stop_list_condition: "",
                 answering_machine_condition: "",
+                effects_config: cloneEffectsDefaults(),
                 active: true,
             }),
         });
@@ -702,6 +828,7 @@ async function saveRobot(event) {
         callback_condition: $("#robotCallbackCondition").value,
         stop_list_condition: $("#robotStopListCondition").value,
         answering_machine_condition: $("#robotAnsweringMachineCondition").value,
+        effects_config: robot.effects_config || cloneEffectsDefaults(),
         active: true,
     };
     if (!payload.name) {
@@ -709,6 +836,7 @@ async function saveRobot(event) {
         return;
     }
     try {
+        await saveRobotGeminiKeysIfChanged();
         const result = await api(`/api/robots/${robot.id}`, {
             method: "PUT",
             body: JSON.stringify(payload),
@@ -722,6 +850,22 @@ async function saveRobot(event) {
         $("#robotSaveMessage").classList.remove("success");
         $("#robotSaveMessage").textContent = error.message;
     }
+}
+
+async function saveRobotGeminiKeysIfChanged() {
+    const actor = $("#robotActorApiKey").value.trim();
+    const director = $("#robotDirectorApiKey").value.trim();
+    const currentActor = state.gemini?.actor_api_key || state.gemini?.api_key || "";
+    const currentDirector = state.gemini?.director_api_key || "";
+    if (actor === currentActor && director === currentDirector) return;
+    await api("/api/settings/gemini", {
+        method: "PUT",
+        body: JSON.stringify({
+            api_key: actor,
+            director_api_key: director,
+        }),
+    });
+    state.gemini = await api("/api/settings/gemini");
 }
 
 async function deleteRobot() {
@@ -753,7 +897,8 @@ async function reloadGeminiSettings() {
 
 function renderGeminiSettings() {
     if (!state.gemini) return;
-    $("#geminiApiKey").value = state.gemini.api_key || "";
+    $("#geminiApiKey").value = state.gemini.actor_api_key || state.gemini.api_key || "";
+    $("#geminiDirectorApiKey").value = state.gemini.director_api_key || "";
     $("#geminiModelId").value = state.gemini.model_id || "";
     $("#geminiEndpoint").value = state.gemini.websocket_endpoint || "";
 }
@@ -765,14 +910,17 @@ async function saveGeminiSettings(event) {
     try {
         await api("/api/settings/gemini", {
             method: "PUT",
-            body: JSON.stringify({ api_key: $("#geminiApiKey").value.trim() }),
+            body: JSON.stringify({
+                api_key: $("#geminiApiKey").value.trim(),
+                director_api_key: $("#geminiDirectorApiKey").value.trim(),
+            }),
         });
         await reloadGeminiSettings();
         state.meta = await api("/api/meta");
         renderRuntimeBadge();
-        message.textContent = "Ключ сохранён";
+        message.textContent = "Ключи сохранены";
         message.classList.add("success");
-        showToast("Gemini API key сохранён");
+        showToast("Ключи Gemini сохранены");
     } catch (error) {
         message.classList.remove("success");
         message.textContent = error.message;
@@ -789,17 +937,21 @@ async function testGeminiSettings() {
     try {
         const result = await api("/api/settings/gemini/test", {
             method: "POST",
-            body: JSON.stringify({ api_key: $("#geminiApiKey").value.trim() }),
+            body: JSON.stringify({
+                api_key: $("#geminiApiKey").value.trim(),
+                director_api_key: $("#geminiDirectorApiKey").value.trim(),
+                target: "both",
+            }),
         });
         message.textContent = result.message;
         message.classList.add("success");
-        showToast("Gemini Live подключение подтверждено");
+        showToast("Оба подключения Gemini Live подтверждены");
     } catch (error) {
         message.textContent = error.message;
         showToast(error.message, true);
     } finally {
         button.disabled = false;
-        button.textContent = "Проверить подключение";
+        button.textContent = "Проверить оба подключения";
     }
 }
 

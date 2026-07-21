@@ -68,3 +68,36 @@ def test_local_store_persists_assignment_outcome_configuration(tmp_path: Path) -
         assert cleared["lead_stage_id"] is None
 
     asyncio.run(exercise())
+
+
+def test_local_store_persists_robot_effect_profile(tmp_path: Path) -> None:
+    settings = Settings(
+        ELVIN_DATA_DIR=tmp_path / "data",
+        ELVIN_LOG_DIR=tmp_path / "logs",
+        ELVIN_RECORDINGS_DIR=tmp_path / "recordings",
+    )
+    store = StateStore(settings)
+
+    async def exercise() -> None:
+        await store.initialize()
+        robot = await store.create_robot(
+            {
+                "name": "Effects",
+                "model_id": "gemini-3.1-flash-live-preview",
+                "voice_name": "Kore",
+                "effects_config": {
+                    "natural_interruption": {
+                        "enabled": True,
+                        "release_ms": 410,
+                    }
+                },
+            }
+        )
+        assert robot["effects_config"]["natural_interruption"]["enabled"] is True
+        assert robot["effects_config"]["natural_interruption"]["release_ms"] == 410
+        loaded = await store.get_robot(robot["id"])
+        assert loaded is not None
+        assert loaded["effects_config"]["natural_interruption"]["release_ms"] == 410
+        assert loaded["effects_config"]["semantic_interruption"]["enabled"] is False
+
+    asyncio.run(exercise())

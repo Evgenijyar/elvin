@@ -81,6 +81,8 @@ class GeminiLiveSession:
         self._generation = 0
         self._input_turn = 0
         self._first_audio_seen_for_generation: set[int] = set()
+        self._first_audio_events: dict[int, asyncio.Event] = {}
+        self.output_boundary_queue: asyncio.Queue[tuple[int, str]] = asyncio.Queue()
         # Gemini can send the interrupted/turn-complete notifications for the
         # previous model turn after the caller has already started the next
         # activity. Keep that previous generation separate so late packets do
@@ -255,6 +257,7 @@ class GeminiLiveSession:
         self._input_transcripts[self._generation] = ""
         self._output_transcripts[self._generation] = ""
         self._turn_complete_events[self._generation] = asyncio.Event()
+        self._first_audio_events[self._generation] = asyncio.Event()
         self.input_transcript = ""
         self.output_transcript = ""
         self.clear_output_nowait(generation=previous_generation)
@@ -269,6 +272,16 @@ class GeminiLiveSession:
                 generation=generation,
             )
             return generation
+
+    async def send_context_hint(self, text: str) -> None:
+        cleaned = str(text or "").strip()
+        if not cleaned:
+            return
+        self._ensure_connected()
+        async with self._send_lock:
+            await self.session.send_realtime_input(
+                text="[ВНУТРЕННЯЯ ПОДСКАЗКА BACKEND] " + cleaned[:1500]
+            )
 
     async def send_audio(self, pcm16: bytes) -> None:
         if not pcm16:
@@ -428,6 +441,9 @@ class GeminiLiveSession:
                 self._output_transcripts[generation] = output_transcript
                 if generation == self._generation:
                     self.output_transcript = output_transcript
+                boundary = self._boundary_kind(text)
+                if boundary is not None:
+                    await self.output_boundary_queue.put((generation, boundary))
                 logger.debug("Gemini output transcription: %s", text)
 
         if not is_pending_previous and (
@@ -467,6 +483,15 @@ class GeminiLiveSession:
                     self._last_audio_packet_at[generation] = now
                     if generation not in self._first_audio_seen_for_generation:
                         self._first_audio_seen_for_generation.add(generation)
+                        first_audio_events = getattr(
+                            self, "_first_audio_events", None
+                        )
+                        if first_audio_events is None:
+                            first_audio_events = {}
+                            self._first_audio_events = first_audio_events
+                        first_audio_events.setdefault(
+                            generation, asyncio.Event()
+                        ).set()
                         self.timeline.add(
                             "GEMINI_FIRST_AUDIO",
                             generation=generation,
@@ -515,6 +540,31 @@ class GeminiLiveSession:
                 input_transcript=input_transcript.strip(),
                 output_transcript=output_transcript.strip(),
             )
+
+
+    async def wait_for_first_audio(self, generation: int, timeout: float) -> bool:
+        event = self._first_audio_events.setdefault(generation, asyncio.Event())
+        try:
+            await asyncio.wait_for(event.wait(), timeout=max(0.01, timeout))
+        except TimeoutError:
+            return False
+        return True
+
+    def transcript_for_generation(self, generation: int) -> str:
+        return str(self._output_transcripts.get(generation, "") or "").strip()
+
+    @staticmethod
+    def _boundary_kind(text: str) -> str | None:
+        stripped = str(text or "").rstrip()
+        if not stripped:
+            return None
+        if stripped.endswith(("?", "？")):
+            return "question"
+        if stripped.endswith((".", "!", "…", "。", "！")):
+            return "medium"
+        if stripped.endswith((",", ";", ":", "—")):
+            return "short"
+        return None
 
     async def _handle_tool_call(self, tool_call: Any) -> None:
         """Acknowledge Gemini Live function calls and retain the latest outcome."""

@@ -46,6 +46,10 @@ class Settings(BaseSettings):
         default=None,
         validation_alias="GEMINI_API_KEY",
     )
+    gemini_director_api_key: SecretStr | None = Field(
+        default=None,
+        validation_alias="GEMINI_DIRECTOR_API_KEY",
+    )
 
     data_dir: Path = Field(
         default=Path("./data"),
@@ -167,6 +171,13 @@ class Settings(BaseSettings):
         return bool(
             self.gemini_api_key
             and self.gemini_api_key.get_secret_value().strip()
+        )
+
+    @property
+    def gemini_director_key_configured(self) -> bool:
+        return bool(
+            self.gemini_director_api_key
+            and self.gemini_director_api_key.get_secret_value().strip()
         )
 
 

@@ -9,6 +9,7 @@ from elvin.api.dependencies import get_store, require_session
 from elvin.infrastructure.state_store import StateStore
 from elvin.integrations.gemini import GEMINI_LIVE_MODEL_ID
 from elvin.integrations.voices import VOICE_OPTIONS
+from elvin.services.conversation_effects import effect_catalog_api, normalize_effects_config
 
 router = APIRouter(prefix="/robots", tags=["robots"])
 VOICE_NAMES = {item.name for item in VOICE_OPTIONS}
@@ -20,6 +21,7 @@ def _normalized_payload(payload: "RobotPayload") -> dict[str, object]:
     if data["voice_name"] not in VOICE_NAMES:
         raise HTTPException(status_code=400, detail="Неизвестный голос Gemini.")
     data["first_phrase"] = ""
+    data["effects_config"] = normalize_effects_config(data.get("effects_config"))
     return data
 
 
@@ -42,7 +44,17 @@ class RobotPayload(BaseModel):
     callback_condition: str = Field(default="", max_length=20_000)
     stop_list_condition: str = Field(default="", max_length=20_000)
     answering_machine_condition: str = Field(default="", max_length=20_000)
+    effects_config: dict[str, object] = Field(default_factory=dict)
     active: bool = True
+
+
+
+
+@router.get("/effects/catalog")
+async def effects_catalog(
+    _session: Annotated[str, Depends(require_session)],
+) -> dict[str, object]:
+    return effect_catalog_api()
 
 
 @router.get("")

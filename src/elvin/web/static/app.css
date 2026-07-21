@@ -370,3 +370,121 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); box-sha
     .limits-grid,
     .outcome-condition-grid { grid-template-columns: 1fr; }
 }
+
+/* Gemini Actor/Director and configurable conversation effects */
+.effects-pane { padding: 0; }
+.effects-workbench {
+    min-height: 560px;
+    display: grid;
+    grid-template-columns: minmax(250px, 310px) minmax(0, 1fr);
+}
+.effects-sidebar {
+    border-right: 1px solid var(--border);
+    background: rgba(8, 11, 17, .62);
+}
+.effects-sidebar-header {
+    padding: 18px;
+    border-bottom: 1px solid var(--border);
+}
+.effects-sidebar-header strong { display: block; font-size: 14px; }
+.effects-sidebar-header small { display: block; margin-top: 5px; color: var(--muted); font-size: 11px; }
+.effects-bulk-actions { display: flex; gap: 7px; margin-top: 13px; }
+.mini-button {
+    padding: 6px 9px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #111722;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 10px;
+    font-weight: 800;
+}
+.mini-button:hover { color: var(--text); border-color: rgba(125, 140, 255, .48); }
+.effects-menu { padding: 8px; }
+.effect-menu-row {
+    display: grid;
+    grid-template-columns: 34px minmax(0, 1fr);
+    align-items: center;
+    margin-bottom: 4px;
+    border: 1px solid transparent;
+    border-radius: 11px;
+}
+.effect-menu-row.active {
+    border-color: rgba(125, 140, 255, .34);
+    background: rgba(125, 140, 255, .08);
+}
+.effect-menu-row.enabled .effect-select-button strong { color: #dfe3ff; }
+.effect-enabled-toggle { width: 17px; height: 17px; margin: auto; accent-color: var(--accent); }
+.effect-select-button {
+    min-width: 0;
+    padding: 11px 9px 11px 3px;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+.effect-select-button strong,
+.effect-select-button small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.effect-select-button strong { color: var(--text); font-size: 12px; }
+.effect-select-button small { margin-top: 4px; color: var(--muted); font-size: 10px; }
+.effect-settings { padding: 24px; min-width: 0; }
+.effect-settings-header {
+    display: flex;
+    justify-content: space-between;
+    gap: 20px;
+    padding-bottom: 18px;
+    border-bottom: 1px solid var(--border);
+}
+.effect-settings-header h3 { margin: 5px 0 8px; font-size: 22px; }
+.effect-settings-header p { max-width: 720px; margin: 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
+.effect-state-badge {
+    align-self: flex-start;
+    flex: 0 0 auto;
+    padding: 6px 9px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    color: var(--muted);
+    font-size: 10px;
+    font-weight: 850;
+    text-transform: uppercase;
+}
+.effect-state-badge.on { color: var(--success); border-color: rgba(74, 213, 154, .3); background: rgba(74, 213, 154, .06); }
+.effect-fields-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+    margin-top: 20px;
+}
+.effect-field { min-width: 0; }
+.effect-field.wide { grid-column: 1 / -1; }
+.effect-field small { display: block; margin-top: 6px; color: var(--muted); font-size: 10px; }
+.tab-pane .effect-field textarea { min-height: 112px; }
+.effect-safety-note {
+    margin-top: 20px;
+    padding: 13px 14px;
+    border: 1px solid rgba(125, 140, 255, .18);
+    border-radius: 11px;
+    background: rgba(125, 140, 255, .05);
+    color: #c7cced;
+    font-size: 11px;
+    line-height: 1.5;
+}
+.key-pair-grid { margin-bottom: 2px; }
+
+@media (max-width: 980px) {
+    .effects-workbench { grid-template-columns: 1fr; }
+    .effects-sidebar { border-right: 0; border-bottom: 1px solid var(--border); }
+    .effects-menu { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .effect-fields-grid { grid-template-columns: 1fr; }
+    .effect-field.wide { grid-column: auto; }
+}
+.inline-settings-note {
+    padding: 11px 13px;
+    border: 1px solid rgba(125, 140, 255, .16);
+    border-radius: 10px;
+    background: rgba(125, 140, 255, .045);
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.45;
+}

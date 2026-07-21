@@ -15,6 +15,7 @@ from elvin.media.runtime import (
     VoiceCallIdentity,
     VoiceRuntime,
 )
+from elvin.services.conversation_effects import any_effect_enabled
 from elvin.services.call_outcomes import (
     NO_ANSWER_KEY,
     destination_for_outcome,
@@ -126,7 +127,14 @@ class CallQueueManager:
         if not self.media_ready:
             raise CallQueueError("Новый голосовой медиаконтур ещё не готов.")
         if not await self._gemini_key():
-            raise CallQueueError("Gemini API key не настроен.")
+            raise CallQueueError("Gemini API key «Актёр» не настроен.")
+        robot = await self.store.get_robot(assignment["robot_id"])
+        if robot is None:
+            raise CallQueueError("Профиль робота не найден.")
+        if any_effect_enabled(robot.get("effects_config")) and not await self._gemini_director_key():
+            raise CallQueueError(
+                "Gemini API key «Режиссёр» не настроен, но у робота включены эффекты."
+            )
 
         batch = await self.store.get_latest_call_batch(assignment["id"])
         if batch is None or batch["status"] in {"COMPLETED", "FAILED", "STOPPED"}:
@@ -290,9 +298,14 @@ class CallQueueManager:
                     robot = await self.store.get_robot(batch["robot_id"])
                     if robot is None:
                         raise CallQueueError("Профиль робота не найден.")
-                    api_key = await self._gemini_key()
-                    if not api_key:
-                        raise CallQueueError("Gemini API key не настроен.")
+                    actor_api_key = await self._gemini_key()
+                    if not actor_api_key:
+                        raise CallQueueError("Gemini API key «Актёр» не настроен.")
+                    director_api_key = await self._gemini_director_key()
+                    if any_effect_enabled(robot.get("effects_config")) and not director_api_key:
+                        raise CallQueueError(
+                            "Gemini API key «Режиссёр» не настроен, но у робота включены эффекты."
+                        )
 
                     identity = VoiceCallIdentity(
                         batch_id=batch_id,
@@ -304,7 +317,8 @@ class CallQueueManager:
                     voice_call = await self.voice_runtime.prepare_call(
                         identity=identity,
                         robot=robot,
-                        api_key=api_key,
+                        actor_api_key=actor_api_key,
+                        director_api_key=director_api_key,
                         background_audio_path=background_path,
                         background_audio_volume=background_volume,
                     )
@@ -600,6 +614,15 @@ class CallQueueManager:
         configured = self.settings.gemini_api_key
         return configured.get_secret_value().strip() if configured else ""
 
+    async def _gemini_director_key(self) -> str:
+        stored = (
+            await self.store.get_setting("gemini_director_api_key") or ""
+        ).strip()
+        if stored:
+            return stored
+        configured = self.settings.gemini_director_api_key
+        return configured.get_secret_value().strip() if configured else ""
+
     def _clear_item_events(self, batch_id: str) -> None:
         self._media_started_events.pop(batch_id, None)
         self._completion_events.pop(batch_id, None)
@@ -615,4 +638,8 @@ class CallQueueManager:
             "assignment_id": context.assignment_id,
             "robot_id": context.robot_id,
             "gemini_ready": context.voice_call.gemini.session is not None,
+            "director_ready": (
+                context.voice_call.director is None
+                or context.voice_call.director.session is not None
+            ),
         }

@@ -102,6 +102,7 @@
                                     <button type="button" class="editor-tab active" data-tab="role">Роль</button>
                                     <button type="button" class="editor-tab" data-tab="knowledge">База знаний</button>
                                     <button type="button" class="editor-tab" data-tab="stages">Стадии</button>
+                                    <button type="button" class="editor-tab" data-tab="effects">Эффекты</button>
                                     <button type="button" class="editor-tab" data-tab="settings">Настройки</button>
                                 </div>
 
@@ -131,6 +132,25 @@
                                     </div>
                                 </div>
 
+                                <div class="tab-pane effects-pane" data-pane="effects">
+                                    <div class="effects-workbench">
+                                        <aside class="effects-sidebar">
+                                            <div class="effects-sidebar-header">
+                                                <div>
+                                                    <strong>Эффекты разговора</strong>
+                                                    <small>Каждый эффект включается отдельно.</small>
+                                                </div>
+                                                <div class="effects-bulk-actions">
+                                                    <button id="enableAllEffects" type="button" class="mini-button">Все</button>
+                                                    <button id="disableAllEffects" type="button" class="mini-button">Ни одного</button>
+                                                </div>
+                                            </div>
+                                            <div id="effectsMenu" class="effects-menu"></div>
+                                        </aside>
+                                        <section id="effectSettings" class="effect-settings"></section>
+                                    </div>
+                                </div>
+
                                 <div class="tab-pane" data-pane="settings">
                                     <div class="form-grid">
                                         <label>
@@ -157,6 +177,15 @@
                                                 <option>Fenrir</option>
                                             </select>
                                         </label>
+                                        <label>
+                                            <span>API-ключ «Актёр»</span>
+                                            <input id="robotActorApiKey" type="text" autocomplete="off" spellcheck="false" placeholder="AIza...">
+                                        </label>
+                                        <label>
+                                            <span>API-ключ «Режиссёр»</span>
+                                            <input id="robotDirectorApiKey" type="text" autocomplete="off" spellcheck="false" placeholder="AIza...">
+                                        </label>
+                                        <div class="wide inline-settings-note">Ключи общие для всех роботов Elvin. Изменение здесь синхронно обновляет раздел «Настройки».</div>
                                         <label class="wide">
                                             <span>Первая фраза</span>
                                             <textarea id="robotFirstPhrase" rows="4"></textarea>
@@ -186,16 +215,23 @@
                         <div>
                             <div class="eyebrow">ПОДКЛЮЧЕНИЕ К МОДЕЛИ</div>
                             <h2>Gemini Live</h2>
-                            <p class="muted">Ключ хранится в данных Elvin и никогда не попадает в Git.</p>
+                            <p class="muted">Ключи «Актёр» и «Режиссёр» хранятся в данных Elvin и никогда не попадают в Git.</p>
                         </div>
                     </div>
 
                     <form id="geminiSettingsForm" class="settings-card">
-                        <label>
-                            <span>Gemini API key</span>
-                            <input id="geminiApiKey" type="text" autocomplete="off" spellcheck="false" placeholder="AIza...">
-                            <small>Ключ показывается полностью — без звёздочек и маскировки.</small>
-                        </label>
+                        <div class="settings-grid key-pair-grid">
+                            <label>
+                                <span>API-ключ «Актёр»</span>
+                                <input id="geminiApiKey" type="text" autocomplete="off" spellcheck="false" placeholder="AIza...">
+                                <small>Основная Gemini Live-сессия: ведёт разговор и генерирует голос Элвина.</small>
+                            </label>
+                            <label>
+                                <span>API-ключ «Режиссёр»</span>
+                                <input id="geminiDirectorApiKey" type="text" autocomplete="off" spellcheck="false" placeholder="AIza...">
+                                <small>Вторая Gemini Live-сессия из отдельного проекта: анализирует разговор и управляет включёнными эффектами.</small>
+                            </label>
+                        </div>
                         <div class="settings-grid">
                             <label>
                                 <span>Модель</span>
@@ -211,8 +247,8 @@
                         </div>
                         <div id="geminiSettingsMessage" class="form-message"></div>
                         <div class="settings-actions">
-                            <button id="testGeminiButton" class="flat-button" type="button">Проверить подключение</button>
-                            <button class="primary-button" type="submit">Сохранить ключ</button>
+                            <button id="testGeminiButton" class="flat-button" type="button">Проверить оба подключения</button>
+                            <button class="primary-button" type="submit">Сохранить ключи</button>
                         </div>
                     </form>
                 </section>
