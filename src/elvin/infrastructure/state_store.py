@@ -355,7 +355,7 @@ class StateStore:
                        first_phrase, lead_condition, special_condition,
                        refusal_condition, callback_condition,
                        stop_list_condition, answering_machine_condition,
-                       active, created_at, updated_at
+                       effects_config, active, created_at, updated_at
                 FROM app.robot_profiles
                 ORDER BY updated_at DESC, name ASC
                 """

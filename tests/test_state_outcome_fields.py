@@ -101,3 +101,55 @@ def test_local_store_persists_robot_effect_profile(tmp_path: Path) -> None:
         assert loaded["effects_config"]["semantic_interruption"]["enabled"] is False
 
     asyncio.run(exercise())
+
+
+def test_postgres_list_robots_returns_saved_effect_profile(tmp_path: Path) -> None:
+    settings = Settings(
+        ELVIN_DATA_DIR=tmp_path / "data",
+        ELVIN_LOG_DIR=tmp_path / "logs",
+        ELVIN_RECORDINGS_DIR=tmp_path / "recordings",
+    )
+    store = StateStore(settings)
+
+    class FakePool:
+        async def fetch(self, query: str):  # type: ignore[no-untyped-def]
+            assert "effects_config" in query
+            from datetime import UTC, datetime
+
+            return [
+                {
+                    "id": "8f348f6f-81ff-45c1-9c29-1ebef122f8ea",
+                    "name": "Effects",
+                    "description": "",
+                    "model_id": "gemini-3.1-flash-live-preview",
+                    "voice_name": "Kore",
+                    "temperature": 0.3,
+                    "role_prompt": "",
+                    "knowledge_base": "",
+                    "first_phrase": "",
+                    "lead_condition": "",
+                    "special_condition": "",
+                    "refusal_condition": "",
+                    "callback_condition": "",
+                    "stop_list_condition": "",
+                    "answering_machine_condition": "",
+                    "effects_config": {
+                        "natural_interruption": {
+                            "enabled": True,
+                            "release_ms": 410,
+                        }
+                    },
+                    "active": True,
+                    "created_at": datetime.now(UTC),
+                    "updated_at": datetime.now(UTC),
+                }
+            ]
+
+    async def exercise() -> None:
+        store.mode = "postgres"
+        store.pool = FakePool()  # type: ignore[assignment]
+        robots = await store.list_robots()
+        assert robots[0]["effects_config"]["natural_interruption"]["enabled"] is True
+        assert robots[0]["effects_config"]["natural_interruption"]["release_ms"] == 410
+
+    asyncio.run(exercise())
