@@ -36,6 +36,12 @@ class RobotPayload(BaseModel):
     role_prompt: str = Field(default="", max_length=100_000)
     knowledge_base: str = Field(default="", max_length=200_000)
     first_phrase: str = Field(default="", max_length=5000)
+    lead_condition: str = Field(default="", max_length=20_000)
+    special_condition: str = Field(default="", max_length=20_000)
+    refusal_condition: str = Field(default="", max_length=20_000)
+    callback_condition: str = Field(default="", max_length=20_000)
+    stop_list_condition: str = Field(default="", max_length=20_000)
+    answering_machine_condition: str = Field(default="", max_length=20_000)
     active: bool = True
 
 

@@ -1,9 +1,23 @@
 """Project-to-robot assignment dashboard and call queues."""
 
+from __future__ import annotations
+
+import asyncio
+import shutil
+from pathlib import Path
 from typing import Annotated
+from uuid import uuid4
 
 import asyncpg
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Request,
+    UploadFile,
+    status,
+)
 from pydantic import BaseModel, Field
 
 from elvin.api.dependencies import (
@@ -18,6 +32,18 @@ from elvin.services.call_queue import CallQueueError, CallQueueManager
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
+_BACKGROUND_AUDIO_MAX_BYTES = 50 * 1024 * 1024
+_BACKGROUND_AUDIO_EXTENSIONS = {
+    ".aac",
+    ".flac",
+    ".m4a",
+    ".mp3",
+    ".ogg",
+    ".opus",
+    ".wav",
+    ".webm",
+}
+
 
 class AssignmentCreate(BaseModel):
     project_id: int
@@ -27,12 +53,37 @@ class AssignmentCreate(BaseModel):
 class AssignmentUpdate(BaseModel):
     source_stage_id: int | None = None
     source_stage_name: str | None = None
+    lead_stage_id: int | None = None
+    lead_stage_name: str | None = None
+    special_stage_id: int | None = None
+    special_stage_name: str | None = None
+    refusal_stage_id: int | None = None
+    refusal_stage_name: str | None = None
+    callback_stage_id: int | None = None
+    callback_stage_name: str | None = None
+    stop_list_stage_id: int | None = None
+    stop_list_stage_name: str | None = None
+    answering_machine_stage_id: int | None = None
+    answering_machine_stage_name: str | None = None
+    no_answer_stage_id: int | None = None
+    no_answer_stage_name: str | None = None
+    count_special_as_lead: bool | None = None
     call_limit: int | None = Field(default=None, ge=1, le=1000)
+    lead_limit: int | None = Field(default=None, ge=0, le=1000)
     max_call_minutes: int | None = Field(default=None, ge=1, le=120)
+    background_audio_volume: int | None = Field(default=None, ge=0, le=100)
 
 
 def _call_queue(request: Request) -> CallQueueManager:
     return request.app.state.call_queue
+
+
+def _background_audio_dir(request: Request) -> Path:
+    return request.app.state.settings.data_dir / "background-audio"
+
+
+def _background_audio_path(request: Request, assignment_id: str) -> Path:
+    return _background_audio_dir(request) / f"{assignment_id}.pcm"
 
 
 async def _gemini_key(request: Request, store: StateStore) -> str:
@@ -82,6 +133,7 @@ async def create_assignment(
                 "robot_id": payload.robot_id,
                 "sort_order": len(await store.list_assignments()),
                 "call_limit": 50,
+                "lead_limit": 0,
                 "max_call_minutes": 5,
             }
         )
@@ -132,15 +184,125 @@ async def update_assignment(
     return {"success": True, "item": await store.get_assignment(assignment_id)}
 
 
+@router.post("/assignments/{assignment_id}/background-audio")
+async def upload_background_audio(
+    assignment_id: str,
+    request: Request,
+    file: Annotated[UploadFile, File(...)],
+    store: Annotated[StateStore, Depends(get_store)],
+    _session: Annotated[str, Depends(require_session)],
+) -> dict[str, object]:
+    assignment = await store.get_assignment(assignment_id)
+    if assignment is None:
+        raise HTTPException(status_code=404, detail="Назначение не найдено.")
+
+    original_name = Path(file.filename or "background-audio").name
+    suffix = Path(original_name).suffix.lower()
+    if suffix not in _BACKGROUND_AUDIO_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail="Поддерживаются WAV, MP3, M4A, AAC, FLAC, OGG, OPUS и WEBM.",
+        )
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise HTTPException(
+            status_code=503,
+            detail="На сервере не найден ffmpeg для подготовки фонового аудио.",
+        )
+
+    audio_dir = _background_audio_dir(request)
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    source_path = audio_dir / f".{assignment_id}-{uuid4().hex}{suffix}"
+    output_tmp = audio_dir / f".{assignment_id}-{uuid4().hex}.pcm"
+    target_path = _background_audio_path(request, assignment_id)
+    total = 0
+    try:
+        with source_path.open("wb") as destination:
+            while chunk := await file.read(1024 * 1024):
+                total += len(chunk)
+                if total > _BACKGROUND_AUDIO_MAX_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail="Фоновый аудиофайл не должен превышать 50 МБ.",
+                    )
+                destination.write(chunk)
+        process = await asyncio.create_subprocess_exec(
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(source_path),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-acodec",
+            "pcm_s16le",
+            "-f",
+            "s16le",
+            str(output_tmp),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _stdout, stderr = await process.communicate()
+        if (
+            process.returncode != 0
+            or not output_tmp.exists()
+            or output_tmp.stat().st_size < 2
+        ):
+            message = stderr.decode("utf-8", errors="replace").strip()
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Не удалось декодировать аудиофайл."
+                    + (f" {message[:300]}" if message else "")
+                ),
+            )
+        output_tmp.replace(target_path)
+        await store.update_assignment(
+            assignment_id,
+            {"background_audio_filename": original_name},
+        )
+    finally:
+        await file.close()
+        source_path.unlink(missing_ok=True)
+        output_tmp.unlink(missing_ok=True)
+
+    return {"success": True, "item": await store.get_assignment(assignment_id)}
+
+
+@router.delete("/assignments/{assignment_id}/background-audio")
+async def delete_background_audio(
+    assignment_id: str,
+    request: Request,
+    store: Annotated[StateStore, Depends(get_store)],
+    _session: Annotated[str, Depends(require_session)],
+) -> dict[str, object]:
+    assignment = await store.get_assignment(assignment_id)
+    if assignment is None:
+        raise HTTPException(status_code=404, detail="Назначение не найдено.")
+    _background_audio_path(request, assignment_id).unlink(missing_ok=True)
+    await store.update_assignment(
+        assignment_id,
+        {"background_audio_filename": ""},
+    )
+    return {"success": True, "item": await store.get_assignment(assignment_id)}
+
+
 @router.delete("/assignments/{assignment_id}")
 async def delete_assignment(
     assignment_id: str,
+    request: Request,
     store: Annotated[StateStore, Depends(get_store)],
     _session: Annotated[str, Depends(require_session)],
 ) -> dict[str, bool]:
     deleted = await store.delete_assignment(assignment_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Назначение не найдено.")
+    _background_audio_path(request, assignment_id).unlink(missing_ok=True)
     return {"success": True}
 
 

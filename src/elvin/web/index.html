@@ -101,6 +101,7 @@
                                 <div class="editor-tabs">
                                     <button type="button" class="editor-tab active" data-tab="role">Роль</button>
                                     <button type="button" class="editor-tab" data-tab="knowledge">База знаний</button>
+                                    <button type="button" class="editor-tab" data-tab="stages">Стадии</button>
                                     <button type="button" class="editor-tab" data-tab="settings">Настройки</button>
                                 </div>
 
@@ -116,6 +117,18 @@
                                         <span>База знаний</span>
                                         <textarea id="robotKnowledge" rows="22"></textarea>
                                     </label>
+                                </div>
+
+                                <div class="tab-pane" data-pane="stages">
+                                    <p class="muted stage-help">Опишите фактические условия разговора. Gemini вызовет отдельный tool для последнего подтверждённого результата. «Недозвон» определяется backend без участия Gemini.</p>
+                                    <div class="outcome-condition-grid">
+                                        <label><span>Лид</span><textarea id="robotLeadCondition" rows="6" placeholder="Например: клиент подтвердил интерес и согласился на следующий контакт"></textarea></label>
+                                        <label><span>Спецстадия</span><textarea id="robotSpecialCondition" rows="6" placeholder="Например: клиент согласился на видеовстречу или конкретную сделку"></textarea></label>
+                                        <label><span>Отказ</span><textarea id="robotRefusalCondition" rows="6" placeholder="Например: клиент явно отказался от предложения"></textarea></label>
+                                        <label><span>Перезвонить</span><textarea id="robotCallbackCondition" rows="6" placeholder="Например: клиент попросил связаться в другое время"></textarea></label>
+                                        <label><span>Стоп-лист</span><textarea id="robotStopListCondition" rows="6" placeholder="Например: клиент потребовал больше не звонить или проявил резкий негатив"></textarea></label>
+                                        <label><span>Автоответчик</span><textarea id="robotAnsweringMachineCondition" rows="6" placeholder="Например: вместо человека отвечает автоответчик или голосовая почта"></textarea></label>
+                                    </div>
                                 </div>
 
                                 <div class="tab-pane" data-pane="settings">

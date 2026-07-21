@@ -221,6 +221,27 @@ class LPTrackerClient:
             "with_phone_count": with_phone,
         }
 
+    async def move_lead_to_stage(
+        self,
+        token: str,
+        lead_id: int,
+        stage_id: int,
+    ) -> Any:
+        """Move a lead through the official LPTracker funnel endpoint."""
+        response = await self.client.put(
+            f"/lead/{lead_id}/funnel",
+            headers={"token": token},
+            json={"funnel": int(stage_id)},
+        )
+        result = self._unwrap(self._decode(response), response.status_code)
+        logger.warning(
+            "LPTracker lead stage updated: lead=%s stage=%s http=%s",
+            lead_id,
+            stage_id,
+            response.status_code,
+        )
+        return result
+
     async def call_lead(
         self,
         token: str,

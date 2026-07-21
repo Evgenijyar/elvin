@@ -10,6 +10,11 @@ from typing import Any
 
 from elvin.integrations.gemini import GEMINI_LIVE_MODEL_ID
 from elvin.observability.timeline import CallTimeline
+from elvin.services.call_outcomes import (
+    OUTCOME_BY_TOOL,
+    build_outcome_instruction,
+    configured_tool_declarations,
+)
 
 logger = logging.getLogger("elvin.gemini_live")
 
@@ -41,6 +46,9 @@ def build_system_instruction(robot: dict[str, Any]) -> str:
         parts.extend(["РОЛЬ И СЦЕНАРИЙ:", role])
     if knowledge:
         parts.extend(["БАЗА ЗНАНИЙ:", knowledge])
+    outcome_instruction = build_outcome_instruction(robot)
+    if outcome_instruction:
+        parts.append(outcome_instruction)
     return "\n\n".join(parts)
 
 
@@ -99,6 +107,9 @@ class GeminiLiveSession:
         self.bot_audio_active = asyncio.Event()
         self.input_transcript = ""
         self.output_transcript = ""
+        self.classified_outcome: str | None = None
+        self.classified_evidence = ""
+        self.outcome_history: list[dict[str, str]] = []
 
     @property
     def generation(self) -> int:
@@ -155,6 +166,7 @@ class GeminiLiveSession:
         )
         model = GEMINI_LIVE_MODEL_ID
         instruction = build_system_instruction(self.robot)
+        tool_declarations = configured_tool_declarations(self.robot)
 
         config: dict[str, Any] = {
             "response_modalities": ["AUDIO"],
@@ -178,6 +190,8 @@ class GeminiLiveSession:
             # makes the latency policy visible and reproducible.
             "thinking_config": {"thinking_level": "minimal"},
         }
+        if tool_declarations:
+            config["tools"] = [{"function_declarations": tool_declarations}]
 
         self.timeline.add(
             "GEMINI_CONNECT_START",
@@ -351,6 +365,10 @@ class GeminiLiveSession:
                 logger.exception("Gemini receive loop failed")
 
     async def _handle_response(self, response: Any) -> None:
+        tool_call = getattr(response, "tool_call", None)
+        if tool_call is not None:
+            await self._handle_tool_call(tool_call)
+
         content = getattr(response, "server_content", None)
         if content is None:
             return
@@ -497,6 +515,65 @@ class GeminiLiveSession:
                 input_transcript=input_transcript.strip(),
                 output_transcript=output_transcript.strip(),
             )
+
+    async def _handle_tool_call(self, tool_call: Any) -> None:
+        """Acknowledge Gemini Live function calls and retain the latest outcome."""
+        self._ensure_connected()
+        from google.genai import types
+
+        function_calls = getattr(tool_call, "function_calls", None) or []
+        responses = []
+        for function_call in function_calls:
+            name = str(getattr(function_call, "name", "") or "")
+            call_id = str(getattr(function_call, "id", "") or "")
+            args = getattr(function_call, "args", None) or {}
+            definition = OUTCOME_BY_TOOL.get(name)
+            if definition is None:
+                response_payload = {
+                    "accepted": False,
+                    "error": "unknown_outcome_tool",
+                }
+                self.timeline.add(
+                    "GEMINI_OUTCOME_TOOL_UNKNOWN",
+                    tool_name=name,
+                    tool_call_id=call_id,
+                )
+            else:
+                evidence = ""
+                if isinstance(args, dict):
+                    evidence = str(args.get("evidence") or "").strip()[:1000]
+                self.classified_outcome = definition.key
+                self.classified_evidence = evidence
+                self.outcome_history.append(
+                    {
+                        "outcome": definition.key,
+                        "tool": name,
+                        "evidence": evidence,
+                    }
+                )
+                response_payload = {
+                    "accepted": True,
+                    "outcome": definition.key,
+                }
+                self.timeline.add(
+                    "GEMINI_OUTCOME_CLASSIFIED",
+                    outcome=definition.key,
+                    label=definition.label,
+                    tool_name=name,
+                    evidence=evidence,
+                )
+            response_kwargs: dict[str, Any] = {
+                "name": name,
+                "response": response_payload,
+            }
+            if call_id:
+                response_kwargs["id"] = call_id
+            responses.append(types.FunctionResponse(**response_kwargs))
+        if responses:
+            async with self._send_lock:
+                await self.session.send_tool_response(
+                    function_responses=responses
+                )
 
     async def close(self) -> None:
         if self._closed:

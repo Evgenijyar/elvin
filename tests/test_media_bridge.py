@@ -7,6 +7,7 @@ from elvin.media.asterisk_bridge import (
     AsteriskMediaInfo,
     AsteriskProtocol,
 )
+from elvin.media.background_audio import LoopingBackgroundAudio
 
 
 class _FakeWebSocket:
@@ -90,12 +91,52 @@ def test_output_audio_is_framed_and_tail_is_padded() -> None:
     asyncio.run(exercise())
 
 
-def test_protocol_accepts_json_and_legacy_events() -> None:
-    protocol = AsteriskProtocol(_FakeWebSocket(), SimpleNamespace(timeline=_FakeTimeline()))
+def test_no_background_preserves_exact_outbound_pcm() -> None:
+    bridge, _websocket, _timeline = _bridge()
+    original = bytes(range(256)) * 5
 
-    assert protocol.parse_text(
-        '{"event":"MEDIA_START","format":"slin16","optimal_frame_size":640}'
-    )["event"] == "MEDIA_START"
+    async def exercise() -> None:
+        await bridge._send_output_audio(original)
+
+    asyncio.run(exercise())
+
+    assert bridge.call.protocol_sent == [original]
+    assert bridge.call.bot_audio.chunks == [original]
+
+
+def test_background_is_mixed_only_on_wire_and_not_in_echo_guard() -> None:
+    bridge, _websocket, _timeline = _bridge()
+    original = b"\x10\x00" * 320
+    noted_playback: list[bytes] = []
+    bridge.background_audio = LoopingBackgroundAudio(
+        b"\x20\x00" * 320,
+        volume_percent=100,
+    )
+    bridge._voice_submission_active = asyncio.Event()
+    bridge.echo_guard = SimpleNamespace(note_playback=noted_playback.append)
+
+    async def exercise() -> None:
+        await bridge._send_output_audio(original)
+
+    asyncio.run(exercise())
+
+    assert bridge.call.protocol_sent[0] != original
+    assert len(bridge.call.protocol_sent[0]) == len(original)
+    assert bridge.call.bot_audio.chunks == bridge.call.protocol_sent
+    assert noted_playback == [original]
+
+
+def test_protocol_accepts_json_and_legacy_events() -> None:
+    protocol = AsteriskProtocol(
+        _FakeWebSocket(), SimpleNamespace(timeline=_FakeTimeline())
+    )
+
+    assert (
+        protocol.parse_text(
+            '{"event":"MEDIA_START","format":"slin16","optimal_frame_size":640}'
+        )["event"]
+        == "MEDIA_START"
+    )
     legacy = protocol.parse_text(
         "MEDIA_START format:slin16 optimal_frame_size:640 ptime:20"
     )

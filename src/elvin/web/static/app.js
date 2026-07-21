@@ -10,16 +10,22 @@ const state = {
     activePage: "calls",
     activeProjectId: null,
     selectedRobotId: null,
+    queuePollTimer: null,
 };
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
 
 async function api(path, options = {}) {
+    const isFormData = options.body instanceof FormData;
+    const headers = { ...(options.headers || {}) };
+    if (!isFormData && !headers["Content-Type"]) {
+        headers["Content-Type"] = "application/json";
+    }
     const response = await fetch(path, {
         credentials: "same-origin",
-        headers: { "Content-Type": "application/json", ...(options.headers || {}) },
         ...options,
+        headers,
     });
     let body = null;
     try { body = await response.json(); } catch (_) { body = {}; }
@@ -115,6 +121,8 @@ async function handleLogin(event) {
 async function handleLogout() {
     try { await api("/api/auth/logout", { method: "POST" }); } catch (_) {}
     state.authenticated = false;
+    if (state.queuePollTimer) clearInterval(state.queuePollTimer);
+    state.queuePollTimer = null;
     state.projects = [];
     state.robots = [];
     state.assignments = [];
@@ -133,6 +141,17 @@ async function enterApplication() {
     $("#authScreen").classList.add("hidden");
     $("#appShell").classList.remove("hidden");
     await refreshAll();
+    startQueuePolling();
+}
+
+function startQueuePolling() {
+    if (state.queuePollTimer) clearInterval(state.queuePollTimer);
+    state.queuePollTimer = setInterval(() => {
+        if (!state.authenticated || state.activePage !== "calls") return;
+        $$("#assignmentGrid .assignment-card").forEach((card) => {
+            void refreshQueueCard(card.dataset.assignmentId, card);
+        });
+    }, 2000);
 }
 
 async function refreshAll() {
@@ -247,6 +266,33 @@ function queueStatusLabel(status) {
     return labels[status] || status || "Очередь не создана";
 }
 
+function stageOptions(stages, selectedId) {
+    return ['<option value="">Не выбрана</option>', ...stages.map((stage) => `
+        <option value="${stage.id}" ${Number(stage.id) === Number(selectedId) ? "selected" : ""}>${escapeHtml(stage.name)}</option>
+    `)].join("");
+}
+
+function stageField(label, cssClass, idField, nameField, stages, item) {
+    return `
+        <label class="stage-field">
+            <span>${label}</span>
+            <select class="${cssClass}" data-id-field="${idField}" data-name-field="${nameField}">
+                ${stageOptions(stages, item[idField])}
+            </select>
+        </label>
+    `;
+}
+
+async function updateAssignmentValue(id, item, payload, message = "Настройки сохранены") {
+    const result = await api(`/api/dashboard/assignments/${id}`, {
+        method: "PUT",
+        body: JSON.stringify(payload),
+    });
+    Object.assign(item, result.item);
+    showToast(message);
+    return result.item;
+}
+
 async function renderCalls() {
     const assignments = state.assignments.filter((item) => Number(item.project_id) === Number(state.activeProjectId));
     $("#callsEmpty").classList.toggle("hidden", assignments.length > 0);
@@ -259,83 +305,143 @@ async function renderCalls() {
     await ensureStages(project.project_id);
     const stages = state.stages.get(project.project_id) || [];
 
-    $("#assignmentGrid").innerHTML = assignments.map((item) => {
-        const stageOptions = ['<option value="">Выберите стадию</option>', ...stages.map((stage) => `
-            <option value="${stage.id}" ${Number(stage.id) === Number(item.source_stage_id) ? "selected" : ""}>${escapeHtml(stage.name)}</option>
-        `)].join("");
-        return `
-            <article class="assignment-card" data-assignment-id="${item.id}">
-                <div class="assignment-head">
-                    <div>
-                        <h3>${escapeHtml(item.robot_name)}</h3>
-                        <p>${escapeHtml(item.robot_description || "Описание не заполнено")}</p>
-                    </div>
-                    <span class="status-pill">${escapeHtml(item.status || "STOPPED")}</span>
+    $("#assignmentGrid").innerHTML = assignments.map((item) => `
+        <article class="assignment-card" data-assignment-id="${item.id}">
+            <div class="assignment-head">
+                <div>
+                    <h3>${escapeHtml(item.robot_name)}</h3>
+                    <p>${escapeHtml(item.robot_description || "Описание не заполнено")}</p>
                 </div>
-                <div class="assignment-body">
-                    <div class="assignment-meta">
-                        <div class="meta-cell"><span>Модель</span><strong>${escapeHtml(item.model_id)}</strong></div>
-                        <div class="meta-cell"><span>Голос</span><strong>${escapeHtml(item.voice_name)}</strong></div>
-                    </div>
-                    <label>
-                        <span>Стадия, из которой забирать лиды</span>
-                        <select class="stage-select">${stageOptions}</select>
-                    </label>
-                    <label>
-                        <span>Лимит звонков в очереди</span>
-                        <input class="call-limit" type="number" min="1" max="1000" value="${Number(item.call_limit || 50)}">
-                    </label>
-                    <div class="queue-summary" data-queue-summary>
-                        <span>Очередь</span>
-                        <strong>Загрузка…</strong>
-                        <small></small>
-                    </div>
-                    <div class="assignment-actions multi-row">
-                        <button class="flat-button preview-button" type="button">Проверить лиды</button>
-                        <button class="flat-button prepare-queue" type="button">Собрать очередь</button>
-                        <button class="flat-button show-queue" type="button">Открыть очередь</button>
-                        <button class="primary-button start" type="button">Старт</button>
-                        <button class="flat-button stop" type="button">Стоп</button>
-                        <button class="flat-button danger remove-assignment" type="button">Удалить</button>
-                    </div>
-                    <div class="webhook-line ${item.webhook_registered ? "ok" : ""}">
-                        ${item.webhook_registered ? "✓ Webhook LPTracker зарегистрирован" : (state.meta?.environment === "production" ? "Webhook пока не подтверждён" : "Webhook зарегистрируется после серверного деплоя")}
-                    </div>
+                <span class="status-pill">${escapeHtml(item.status || "STOPPED")}</span>
+            </div>
+            <div class="assignment-body">
+                <div class="assignment-meta">
+                    <div class="meta-cell"><span>Модель</span><strong>${escapeHtml(item.model_id)}</strong></div>
+                    <div class="meta-cell"><span>Голос</span><strong>${escapeHtml(item.voice_name)}</strong></div>
                 </div>
-            </article>
-        `;
-    }).join("");
+
+                <div class="stage-grid">
+                    ${stageField("Откуда забирать лиды", "source-stage", "source_stage_id", "source_stage_name", stages, item)}
+                    ${stageField("Лид", "outcome-stage", "lead_stage_id", "lead_stage_name", stages, item)}
+                    ${stageField("Спецстадия", "outcome-stage", "special_stage_id", "special_stage_name", stages, item)}
+                    ${stageField("Отказ", "outcome-stage", "refusal_stage_id", "refusal_stage_name", stages, item)}
+                    ${stageField("Перезвонить", "outcome-stage", "callback_stage_id", "callback_stage_name", stages, item)}
+                    ${stageField("Стоп-лист", "outcome-stage", "stop_list_stage_id", "stop_list_stage_name", stages, item)}
+                    ${stageField("Автоответчик", "outcome-stage", "answering_machine_stage_id", "answering_machine_stage_name", stages, item)}
+                    ${stageField("Недозвон", "outcome-stage", "no_answer_stage_id", "no_answer_stage_name", stages, item)}
+                    <label class="checkbox-field">
+                        <input class="count-special" type="checkbox" ${item.count_special_as_lead ? "checked" : ""}>
+                        <span>Считать спецстадию лидом</span>
+                    </label>
+                </div>
+
+                <div class="limits-grid">
+                    <label><span>Limit звонков</span><input class="call-limit" type="number" min="1" max="1000" value="${Number(item.call_limit || 50)}"></label>
+                    <label><span>Limit лидов (0 — без лимита)</span><input class="lead-limit" type="number" min="0" max="1000" value="${Number(item.lead_limit || 0)}"></label>
+                    <div class="counter-cell"><span>Звонков совершено</span><strong class="calls-count">0</strong></div>
+                    <div class="counter-cell"><span>Лидов собрано</span><strong class="leads-count">0</strong></div>
+                </div>
+
+                <div class="background-audio-row">
+                    <label class="audio-file-field">
+                        <span>Фоновое аудио (циклично, только клиенту)</span>
+                        <input class="background-file" type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.flac,.ogg,.opus,.webm">
+                    </label>
+                    <div class="audio-current ${item.background_audio_filename ? "" : "empty"}">
+                        <span class="audio-filename">${escapeHtml(item.background_audio_filename || "Файл не выбран")}</span>
+                        <button class="audio-delete" type="button" title="Удалить фоновое аудио" ${item.background_audio_filename ? "" : "disabled"}>×</button>
+                    </div>
+                    <label class="volume-field">
+                        <span>Громкость: <b class="volume-value">${Number(item.background_audio_volume ?? 15)}%</b></span>
+                        <input class="background-volume" type="range" min="0" max="100" step="1" value="${Number(item.background_audio_volume ?? 15)}">
+                    </label>
+                </div>
+
+                <div class="queue-summary" data-queue-summary>
+                    <span>Очередь</span>
+                    <strong>Загрузка…</strong>
+                    <small></small>
+                </div>
+                <div class="assignment-actions multi-row">
+                    <button class="flat-button preview-button" type="button">Проверить лиды</button>
+                    <button class="flat-button prepare-queue" type="button">Собрать очередь</button>
+                    <button class="flat-button show-queue" type="button">Открыть очередь</button>
+                    <button class="primary-button start" type="button">Старт</button>
+                    <button class="flat-button stop" type="button">Стоп</button>
+                    <button class="flat-button danger remove-assignment" type="button">Удалить</button>
+                </div>
+                <div class="webhook-line ${item.webhook_registered ? "ok" : ""}">
+                    ${item.webhook_registered ? "✓ Webhook LPTracker зарегистрирован" : (state.meta?.environment === "production" ? "Webhook пока не подтверждён" : "Webhook зарегистрируется после серверного деплоя")}
+                </div>
+            </div>
+        </article>
+    `).join("");
 
     $("#assignmentGrid").querySelectorAll(".assignment-card").forEach((card) => {
         const id = card.dataset.assignmentId;
         const item = state.assignments.find((assignment) => assignment.id === id);
-        card.querySelector(".stage-select").addEventListener("change", async (event) => {
-            const stage = stages.find((candidate) => String(candidate.id) === event.target.value);
-            try {
-                const result = await api(`/api/dashboard/assignments/${id}`, {
-                    method: "PUT",
-                    body: JSON.stringify({
-                        source_stage_id: stage?.id || null,
-                        source_stage_name: stage?.name || "",
-                    }),
-                });
-                Object.assign(item, result.item);
-                state.queues.delete(id);
-                showToast("Стадия сохранена");
-                await refreshQueueCard(id, card);
-            } catch (error) { showToast(error.message, true); }
+        card.querySelectorAll(".source-stage, .outcome-stage").forEach((select) => {
+            select.addEventListener("change", async (event) => {
+                const stage = stages.find((candidate) => String(candidate.id) === event.target.value);
+                const payload = {
+                    [select.dataset.idField]: stage?.id || null,
+                    [select.dataset.nameField]: stage?.name || "",
+                };
+                try {
+                    await updateAssignmentValue(id, item, payload, "Стадия сохранена");
+                    if (select.classList.contains("source-stage")) {
+                        state.queues.delete(id);
+                        await refreshQueueCard(id, card);
+                    }
+                } catch (error) { showToast(error.message, true); }
+            });
+        });
+        card.querySelector(".count-special").addEventListener("change", async (event) => {
+            try { await updateAssignmentValue(id, item, { count_special_as_lead: event.target.checked }); }
+            catch (error) { showToast(error.message, true); }
         });
         card.querySelector(".call-limit").addEventListener("change", async (event) => {
             const value = Math.max(1, Math.min(1000, Number(event.target.value || 50)));
             event.target.value = value;
             try {
-                const result = await api(`/api/dashboard/assignments/${id}`, {
-                    method: "PUT",
-                    body: JSON.stringify({ call_limit: value }),
-                });
-                Object.assign(item, result.item);
+                await updateAssignmentValue(id, item, { call_limit: value }, "Лимит звонков сохранён");
                 state.queues.delete(id);
-                showToast("Лимит сохранён");
+            } catch (error) { showToast(error.message, true); }
+        });
+        card.querySelector(".lead-limit").addEventListener("change", async (event) => {
+            const value = Math.max(0, Math.min(1000, Number(event.target.value || 0)));
+            event.target.value = value;
+            try { await updateAssignmentValue(id, item, { lead_limit: value }, "Лимит лидов сохранён"); }
+            catch (error) { showToast(error.message, true); }
+        });
+        const volume = card.querySelector(".background-volume");
+        volume.addEventListener("input", () => {
+            card.querySelector(".volume-value").textContent = `${volume.value}%`;
+        });
+        volume.addEventListener("change", async () => {
+            try { await updateAssignmentValue(id, item, { background_audio_volume: Number(volume.value) }, "Громкость сохранена"); }
+            catch (error) { showToast(error.message, true); }
+        });
+        card.querySelector(".background-file").addEventListener("change", async (event) => {
+            const file = event.target.files?.[0];
+            if (!file) return;
+            const form = new FormData();
+            form.append("file", file);
+            event.target.disabled = true;
+            try {
+                const result = await api(`/api/dashboard/assignments/${id}/background-audio`, { method: "POST", body: form });
+                Object.assign(item, result.item);
+                showToast("Фоновое аудио загружено");
+                await renderCalls();
+            } catch (error) { showToast(error.message, true); }
+            finally { event.target.disabled = false; }
+        });
+        card.querySelector(".audio-delete").addEventListener("click", async () => {
+            try {
+                const result = await api(`/api/dashboard/assignments/${id}/background-audio`, { method: "DELETE" });
+                Object.assign(item, result.item);
+                showToast("Фоновое аудио удалено");
+                await renderCalls();
             } catch (error) { showToast(error.message, true); }
         });
         card.querySelector(".preview-button").addEventListener("click", () => previewLeads(id));
@@ -360,7 +466,10 @@ async function refreshQueueCard(assignmentId, card) {
         }
         const batch = result.batch;
         summary.querySelector("strong").textContent = queueStatusLabel(batch.status);
-        summary.querySelector("small").textContent = `${batch.completed || 0} выполнено · ${batch.failed || 0} ошибок · ${batch.total || 0} всего`;
+        const stopReason = batch.stop_reason === "lead_limit" ? " · остановка по лимиту лидов" : (batch.stop_reason === "call_limit" ? " · остановка по лимиту звонков" : "");
+        summary.querySelector("small").textContent = `${batch.completed || 0} выполнено · ${batch.failed || 0} ошибок · ${batch.total || 0} всего${stopReason}`;
+        card.querySelector(".calls-count").textContent = batch.calls_made || 0;
+        card.querySelector(".leads-count").textContent = batch.leads_count || 0;
         const statusPill = card.querySelector(".status-pill");
         statusPill.textContent = batch.status;
     } catch (error) {
@@ -434,6 +543,8 @@ function renderQueueModal(result) {
             <td>${escapeHtml(item.contact_name)}</td>
             <td>${escapeHtml(item.phone_masked)}</td>
             <td><span class="queue-item-status">${escapeHtml(item.status)}</span></td>
+            <td>${escapeHtml(item.outcome || "—")}</td>
+            <td>${escapeHtml(item.destination_stage_name || "—")}</td>
         </tr>
     `).join("");
     $("#queueContent").innerHTML = `
@@ -442,9 +553,11 @@ function renderQueueModal(result) {
             <div class="meta-cell"><span>Выполнено</span><strong>${batch.completed || 0}</strong></div>
             <div class="meta-cell"><span>Ошибок</span><strong>${batch.failed || 0}</strong></div>
             <div class="meta-cell"><span>Всего</span><strong>${batch.total || 0}</strong></div>
+            <div class="meta-cell"><span>Звонков</span><strong>${batch.calls_made || 0}</strong></div>
+            <div class="meta-cell"><span>Лидов</span><strong>${batch.leads_count || 0}</strong></div>
         </div>
         <table class="preview-table">
-            <thead><tr><th>№</th><th>ID</th><th>Лид</th><th>Контакт</th><th>Телефон</th><th>Статус</th></tr></thead>
+            <thead><tr><th>№</th><th>ID</th><th>Лид</th><th>Контакт</th><th>Телефон</th><th>Статус</th><th>Результат</th><th>Стадия</th></tr></thead>
             <tbody>${rows}</tbody>
         </table>
     `;
@@ -522,6 +635,12 @@ function renderRobotEditor() {
     $("#robotRole").value = robot.role_prompt || "";
     $("#robotKnowledge").value = robot.knowledge_base || "";
     $("#robotFirstPhrase").value = robot.first_phrase || "";
+    $("#robotLeadCondition").value = robot.lead_condition || "";
+    $("#robotSpecialCondition").value = robot.special_condition || "";
+    $("#robotRefusalCondition").value = robot.refusal_condition || "";
+    $("#robotCallbackCondition").value = robot.callback_condition || "";
+    $("#robotStopListCondition").value = robot.stop_list_condition || "";
+    $("#robotAnsweringMachineCondition").value = robot.answering_machine_condition || "";
     renderTemperature();
     const key = $("#geminiKeyStatus");
     key.textContent = state.gemini?.configured
@@ -547,6 +666,12 @@ async function createRobot() {
                 role_prompt: "",
                 knowledge_base: "",
                 first_phrase: "",
+                lead_condition: "",
+                special_condition: "",
+                refusal_condition: "",
+                callback_condition: "",
+                stop_list_condition: "",
+                answering_machine_condition: "",
                 active: true,
             }),
         });
@@ -571,6 +696,12 @@ async function saveRobot(event) {
         role_prompt: $("#robotRole").value,
         knowledge_base: $("#robotKnowledge").value,
         first_phrase: $("#robotFirstPhrase").value,
+        lead_condition: $("#robotLeadCondition").value,
+        special_condition: $("#robotSpecialCondition").value,
+        refusal_condition: $("#robotRefusalCondition").value,
+        callback_condition: $("#robotCallbackCondition").value,
+        stop_list_condition: $("#robotStopListCondition").value,
+        answering_machine_condition: $("#robotAnsweringMachineCondition").value,
         active: true,
     };
     if (!payload.name) {

@@ -157,6 +157,10 @@ class AsteriskGeminiBridge:
         self.call = call
         self.protocol = AsteriskProtocol(websocket, call)
         self.resampler = Pcm24To16Resampler()
+        # Optional office/background sound is an isolated final-leg overlay.
+        # It never enters caller input, VAD, echo correlation or Gemini.
+        self.background_audio = call.background_audio
+        self._voice_submission_active = asyncio.Event()
         # chan_websocket does not perform acoustic echo cancellation. Keep a
         # short copy of playback submitted to Asterisk so the local VAD can
         # suppress only high-confidence far-end echo while preserving true
@@ -199,6 +203,12 @@ class AsteriskGeminiBridge:
             name=f"asterisk-playback-monitor-{self.call.identity.call_id}",
         )
         tasks = {input_task, output_task, monitor_task}
+        if self.background_audio is not None:
+            background_task = asyncio.create_task(
+                self._background_loop(),
+                name=f"asterisk-background-{self.call.identity.call_id}",
+            )
+            tasks.add(background_task)
         result = "caller_hangup"
         try:
             done, pending = await asyncio.wait(
@@ -604,20 +614,37 @@ class AsteriskGeminiBridge:
         # barge-in because FLUSH_MEDIA clears that remote buffer.
         if generation is not None and generation != self.call.gemini.generation:
             return
-        sent = await self.protocol.send_media(chunk, generation=generation)
-        if not sent:
-            return
-        self.call.detector.set_bot_speaking(True)
+        wire_chunk = chunk
+        background_audio = getattr(self, "background_audio", None)
+        voice_submission_active = getattr(
+            self, "_voice_submission_active", None
+        )
+        if background_audio is not None:
+            wire_chunk = await background_audio.mix_with_voice(chunk)
+            if voice_submission_active is not None:
+                voice_submission_active.set()
+        try:
+            sent = await self.protocol.send_media(
+                wire_chunk, generation=generation
+            )
+            if not sent:
+                return
+            self.call.detector.set_bot_speaking(True)
+        finally:
+            if voice_submission_active is not None:
+                voice_submission_active.clear()
         if self.call.gemini.generation not in self._first_output_generation:
             self._first_output_generation.add(self.call.gemini.generation)
             self.call.timeline.add(
                 "ASTERISK_FIRST_AUDIO_SENT",
                 generation=self.call.gemini.generation,
-                bytes=len(chunk),
+                bytes=len(wire_chunk),
             )
-        self.call.bot_audio.submit(chunk)
+        self.call.bot_audio.submit(wire_chunk)
         echo_guard = getattr(self, "echo_guard", None)
         if echo_guard is not None:
+            # Keep the established echo guard trained on the model voice only.
+            # The optional office track is never fed into inbound processing.
             echo_guard.note_playback(chunk)
         loop = asyncio.get_running_loop()
         sent_at = loop.time()
@@ -638,6 +665,49 @@ class AsteriskGeminiBridge:
         self._last_output_submission_generation = (
             self.call.gemini.generation
         )
+
+    async def _background_loop(self) -> None:
+        """Pace the optional loop only on the Asterisk outbound leg."""
+        background = self.background_audio
+        if background is None:
+            return
+        await self.protocol.media_started.wait()
+        self.call.timeline.add(
+            "BACKGROUND_AUDIO_PLAYBACK_STARTED",
+            volume_percent=background.volume_percent,
+        )
+        loop = asyncio.get_running_loop()
+        next_tick = loop.time()
+        while not self._closed:
+            ptime_seconds = max(
+                0.01, float(self.protocol.info.ptime or 20) / 1000.0
+            )
+            frame_size = max(
+                2, int(self.protocol.info.optimal_frame_size or 640)
+            )
+            frame_size -= frame_size % 2
+            # Voice batches already carry the mixed background. Do not enqueue
+            # separate background frames while model playback is active.
+            if (
+                self._voice_submission_active.is_set()
+                or self.call.detector.bot_speaking
+                or self.call.gemini.bot_audio_active.is_set()
+            ):
+                next_tick = loop.time() + ptime_seconds
+                await asyncio.sleep(ptime_seconds)
+                continue
+            frame = await background.background_bytes(frame_size)
+            if frame:
+                sent = await self.protocol.send_media(frame)
+                if sent:
+                    self.call.bot_audio.submit(frame)
+            next_tick += ptime_seconds
+            delay = next_tick - loop.time()
+            if delay <= 0:
+                next_tick = loop.time()
+                await asyncio.sleep(0)
+            else:
+                await asyncio.sleep(delay)
 
     async def _discard_output_buffer(self) -> None:
         async with self._output_buffer_lock:

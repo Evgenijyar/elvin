@@ -15,6 +15,11 @@ from elvin.media.runtime import (
     VoiceCallIdentity,
     VoiceRuntime,
 )
+from elvin.services.call_outcomes import (
+    NO_ANSWER_KEY,
+    destination_for_outcome,
+    outcome_counts_as_lead,
+)
 
 logger = logging.getLogger("elvin.calls")
 
@@ -89,9 +94,7 @@ class CallQueueManager:
             await asyncio.gather(*tasks, return_exceptions=True)
         await self._clear_all_media()
 
-    async def prepare(
-        self, assignment: dict[str, Any], token: str
-    ) -> dict[str, Any]:
+    async def prepare(self, assignment: dict[str, Any], token: str) -> dict[str, Any]:
         stage_id = assignment.get("source_stage_id")
         if not stage_id:
             raise CallQueueError("Сначала выберите стадию-источник лидов.")
@@ -114,14 +117,10 @@ class CallQueueManager:
             source_stage_id=int(stage_id),
             items=leads,
         )
-        await self.store.update_assignment(
-            assignment["id"], {"status": "QUEUE_READY"}
-        )
+        await self.store.update_assignment(assignment["id"], {"status": "QUEUE_READY"})
         return batch
 
-    async def start(
-        self, assignment: dict[str, Any], token: str
-    ) -> dict[str, Any]:
+    async def start(self, assignment: dict[str, Any], token: str) -> dict[str, Any]:
         if not self.calls_enabled:
             raise CallQueueError("Реальные вызовы выключены настройкой Elvin.")
         if not self.media_ready:
@@ -130,9 +129,7 @@ class CallQueueManager:
             raise CallQueueError("Gemini API key не настроен.")
 
         batch = await self.store.get_latest_call_batch(assignment["id"])
-        if batch is None or batch["status"] in {
-            "COMPLETED", "FAILED", "STOPPED"
-        }:
+        if batch is None or batch["status"] in {"COMPLETED", "FAILED", "STOPPED"}:
             batch = await self.prepare(assignment, token)
         batch_id = batch["id"]
 
@@ -184,6 +181,7 @@ class CallQueueManager:
                 self._active_media = context
                 context.voice_call.timeline.add("ASTERISK_CALL_CLAIMED")
                 return context
+
         try:
             return await asyncio.wait_for(wait_and_claim(), timeout=timeout)
         except TimeoutError as exc:
@@ -209,9 +207,7 @@ class CallQueueManager:
         if event := self._media_started_events.get(batch_id):
             event.set()
 
-    async def media_finished(
-        self, batch_id: str, lead_id: int, result: str
-    ) -> None:
+    async def media_finished(self, batch_id: str, lead_id: int, result: str) -> None:
         batch = await self.store.get_call_batch(batch_id)
         if batch is None or int(batch.get("current_lead_id") or 0) != int(lead_id):
             return
@@ -238,16 +234,43 @@ class CallQueueManager:
             if batch is None:
                 return
             assignment = await self.store.get_assignment(batch["assignment_id"])
+            if assignment is None:
+                raise CallQueueError("Назначение проекта не найдено.")
             max_call_seconds = max(
                 60,
-                min(int((assignment or {}).get("max_call_minutes") or 5), 120)
-                * 60,
+                min(int(assignment.get("max_call_minutes") or 5), 120) * 60,
             )
+            call_limit = max(1, min(int(assignment.get("call_limit") or 50), 1000))
+            lead_limit = max(0, min(int(assignment.get("lead_limit") or 0), 1000))
+            background_path = None
+            if assignment.get("background_audio_filename"):
+                candidate = (
+                    self.settings.data_dir
+                    / "background-audio"
+                    / f"{assignment['id']}.pcm"
+                )
+                if candidate.is_file():
+                    background_path = candidate
+            background_volume = int(assignment.get("background_audio_volume") or 0)
             await self.store.update_assignment(
                 batch["assignment_id"], {"status": "RUNNING"}
             )
 
             while not stop_event.is_set():
+                current_batch = await self.store.get_call_batch(batch_id)
+                if current_batch is None:
+                    break
+                stop_reason = self._limit_stop_reason(
+                    current_batch,
+                    call_limit=call_limit,
+                    lead_limit=lead_limit,
+                )
+                if stop_reason:
+                    await self.store.update_call_batch(
+                        batch_id, stop_reason=stop_reason
+                    )
+                    break
+
                 item = await self.store.next_pending_call_item(batch_id)
                 if item is None:
                     break
@@ -257,9 +280,7 @@ class CallQueueManager:
                 self._media_started_events[batch_id] = media_started
                 self._completion_events[batch_id] = completed
                 try:
-                    await self.store.update_call_item(
-                        item["id"], status="AI_PREPARING"
-                    )
+                    await self.store.update_call_item(item["id"], status="AI_PREPARING")
                     await self.store.update_call_batch(
                         batch_id,
                         status="AI_PREPARING",
@@ -284,6 +305,8 @@ class CallQueueManager:
                         identity=identity,
                         robot=robot,
                         api_key=api_key,
+                        background_audio_path=background_path,
+                        background_audio_volume=background_volume,
                     )
                     context = MediaCallContext(
                         batch_id=batch_id,
@@ -303,6 +326,7 @@ class CallQueueManager:
                     voice_call.timeline.add("LPTRACKER_CALL_REQUEST")
                     await self.lptracker.call_lead(token, context.lead_id)
                     voice_call.timeline.add("LPTRACKER_CALL_ACCEPTED")
+                    await self.store.increment_call_batch(batch_id, calls_made=1)
                     await self.store.update_call_item(
                         item["id"], status="WAITING_FOR_MEDIA"
                     )
@@ -315,44 +339,81 @@ class CallQueueManager:
                         stop_event,
                         self.media_connect_timeout_seconds,
                     )
-                    if wait_result != "event":
-                        raise CallQueueError(
-                            "Asterisk не подключил медиаканал вовремя."
-                            if wait_result == "timeout"
-                            else "Обзвон остановлен пользователем."
+                    if wait_result == "stopped":
+                        await self.store.update_call_item(
+                            item["id"],
+                            status="STOPPED",
+                            result="stopped_by_user",
                         )
-                    await self.store.update_call_item(
-                        item["id"], status="IN_CALL"
-                    )
+                        break
+                    if wait_result == "timeout":
+                        await self._record_outcome(
+                            token=token,
+                            assignment=assignment,
+                            item=item,
+                            outcome=NO_ANSWER_KEY,
+                            voice_call=voice_call,
+                        )
+                        await self.store.update_call_item(
+                            item["id"],
+                            status="COMPLETED",
+                            result="no_answer",
+                        )
+                        await self.store.increment_call_batch(batch_id, completed=1)
+                        continue
+
+                    await self.store.update_call_item(item["id"], status="IN_CALL")
                     call_result = await self._wait_event_or_stop(
                         completed, stop_event, float(max_call_seconds)
                     )
                     if call_result == "event":
-                        result = self._completion_results.pop(
-                            batch_id, "completed"
-                        )
+                        result = self._completion_results.pop(batch_id, "completed")
                         failed = result.startswith("media_error:")
+                        outcome = voice_call.gemini.classified_outcome
+                        move_error = ""
+                        if outcome:
+                            move_error = await self._record_outcome(
+                                token=token,
+                                assignment=assignment,
+                                item=item,
+                                outcome=outcome,
+                                voice_call=voice_call,
+                            )
                         await self.store.update_call_item(
                             item["id"],
                             status="FAILED" if failed else "COMPLETED",
                             result=result,
-                            error_message=result if failed else "",
+                            error_message=result if failed else move_error,
                         )
                         await self.store.increment_call_batch(
-                            batch_id, **({"failed": 1} if failed else {"completed": 1})
+                            batch_id,
+                            **({"failed": 1} if failed else {"completed": 1}),
                         )
                     elif call_result == "stopped":
                         await self._terminate_media(batch_id)
                         await self.store.update_call_item(
-                            item["id"], status="STOPPED", result="stopped_by_user"
+                            item["id"],
+                            status="STOPPED",
+                            result="stopped_by_user",
                         )
                         break
                     else:
                         await self._terminate_media(batch_id)
+                        outcome = voice_call.gemini.classified_outcome
+                        if outcome:
+                            await self._record_outcome(
+                                token=token,
+                                assignment=assignment,
+                                item=item,
+                                outcome=outcome,
+                                voice_call=voice_call,
+                            )
                         await self.store.update_call_item(
                             item["id"],
                             status="CALL_TIMEOUT",
-                            error_message="Превышена максимальная длительность звонка.",
+                            error_message=(
+                                "Превышена максимальная длительность звонка."
+                            ),
                         )
                         await self.store.increment_call_batch(batch_id, failed=1)
                 except Exception as exc:
@@ -377,9 +438,12 @@ class CallQueueManager:
 
             final = await self.store.get_call_batch(batch_id)
             final_status = "STOPPED" if stop_event.is_set() else "COMPLETED"
-            if final and int(final.get("completed") or 0) == 0 and int(
-                final.get("failed") or 0
-            ) >= int(final.get("total") or 0) > 0:
+            if (
+                final
+                and not final.get("stop_reason")
+                and int(final.get("completed") or 0) == 0
+                and int(final.get("failed") or 0) >= int(final.get("total") or 0) > 0
+            ):
                 final_status = "FAILED"
             await self.store.update_call_batch(
                 batch_id, status=final_status, current_lead_id=None
@@ -403,6 +467,65 @@ class CallQueueManager:
                 self._tasks.pop(batch_id, None)
                 self._stop_events.pop(batch_id, None)
                 self._clear_item_events(batch_id)
+
+    @staticmethod
+    def _limit_stop_reason(
+        batch: dict[str, Any], *, call_limit: int, lead_limit: int
+    ) -> str:
+        if int(batch.get("calls_made") or 0) >= call_limit:
+            return "call_limit"
+        if lead_limit > 0 and int(batch.get("leads_count") or 0) >= lead_limit:
+            return "lead_limit"
+        return ""
+
+    async def _record_outcome(
+        self,
+        *,
+        token: str,
+        assignment: dict[str, Any],
+        item: dict[str, Any],
+        outcome: str,
+        voice_call: PreparedVoiceCall,
+    ) -> str:
+        stage_id, stage_name = destination_for_outcome(assignment, outcome)
+        move_error = ""
+        if stage_id is not None:
+            try:
+                await self.lptracker.move_lead_to_stage(
+                    token, int(item["lead_id"]), stage_id
+                )
+                voice_call.timeline.add(
+                    "LPTRACKER_OUTCOME_STAGE_UPDATED",
+                    outcome=outcome,
+                    stage_id=stage_id,
+                    stage_name=stage_name,
+                )
+            except Exception as exc:
+                move_error = (
+                    f"Не удалось переместить лид на стадию: {type(exc).__name__}: {exc}"
+                )[:1000]
+                logger.exception(
+                    "Outcome stage update failed: lead=%s outcome=%s stage=%s",
+                    item.get("lead_id"),
+                    outcome,
+                    stage_id,
+                )
+                voice_call.timeline.add(
+                    "LPTRACKER_OUTCOME_STAGE_FAILED",
+                    outcome=outcome,
+                    stage_id=stage_id,
+                    error=move_error,
+                )
+        await self.store.update_call_item(
+            item["id"],
+            outcome=outcome,
+            destination_stage_id=stage_id,
+            destination_stage_name=stage_name,
+            error_message=move_error,
+        )
+        if outcome_counts_as_lead(assignment, outcome):
+            await self.store.increment_call_batch(item["batch_id"], leads_count=1)
+        return move_error
 
     async def _publish_pending_media(self, context: MediaCallContext) -> None:
         async with self._media_condition:

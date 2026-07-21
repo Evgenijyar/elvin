@@ -9,6 +9,7 @@ from typing import Any
 
 from elvin.integrations.gemini_live import GeminiLiveSession
 from elvin.media.audio import AsyncWaveWriter, TELEPHONY_SAMPLE_RATE
+from elvin.media.background_audio import LoopingBackgroundAudio
 from elvin.media.turn_detector import LocalTurnDetector, TurnDetectorConfig
 from elvin.observability.frame_trace import FrameTraceWriter
 from elvin.observability.timeline import CallTimeline
@@ -41,6 +42,8 @@ class PreparedVoiceCall:
         recordings_dir: Path,
         trace_enabled: bool,
         turn_config: TurnDetectorConfig,
+        background_audio_path: Path | None = None,
+        background_audio_volume: int = 0,
     ) -> None:
         self.identity = identity
         self.robot = robot
@@ -68,6 +71,9 @@ class PreparedVoiceCall:
             robot=robot,
             timeline=self.timeline,
         )
+        self.background_audio_path = background_audio_path
+        self.background_audio_volume = max(0, min(int(background_audio_volume), 100))
+        self.background_audio: LoopingBackgroundAudio | None = None
         self.media_attached = False
         self._closed = False
 
@@ -81,6 +87,15 @@ class PreparedVoiceCall:
             lead_id=self.identity.lead_id,
             robot_id=self.identity.robot_id,
         )
+        self.background_audio = await LoopingBackgroundAudio.load(
+            self.background_audio_path,
+            volume_percent=self.background_audio_volume,
+        )
+        if self.background_audio is not None:
+            self.timeline.add(
+                "BACKGROUND_AUDIO_READY",
+                volume_percent=self.background_audio_volume,
+            )
         try:
             await self.gemini.connect()
         except Exception:
@@ -126,6 +141,8 @@ class VoiceRuntime:
         identity: VoiceCallIdentity,
         robot: dict[str, Any],
         api_key: str,
+        background_audio_path: Path | None = None,
+        background_audio_volume: int = 0,
     ) -> PreparedVoiceCall:
         call = PreparedVoiceCall(
             identity=identity,
@@ -134,6 +151,8 @@ class VoiceRuntime:
             recordings_dir=self.recordings_dir,
             trace_enabled=self.trace_enabled,
             turn_config=self.turn_config,
+            background_audio_path=background_audio_path,
+            background_audio_volume=background_audio_volume,
         )
         await call.prepare()
         return call
