@@ -6,8 +6,11 @@ from elvin.media.asterisk_bridge import (
     AsteriskGeminiBridge,
     AsteriskMediaInfo,
     AsteriskProtocol,
+    BackchannelOpportunity,
+    InterruptionCandidate,
 )
 from elvin.media.background_audio import LoopingBackgroundAudio
+from elvin.services.conversation_effects import default_effects_config
 
 
 class _FakeWebSocket:
@@ -200,5 +203,150 @@ def test_pending_turn_is_serialized_and_chunked() -> None:
     assert any(name == "PENDING_TURN_SENT" for name, _ in timeline.events)
 
 
+def test_standalone_soft_interruption_commits_after_local_confirmation() -> None:
+    bridge = object.__new__(AsteriskGeminiBridge)
+    config = default_effects_config(enabled=False)
+    config["natural_interruption"]["enabled"] = True
+    config["natural_interruption"]["confirm_ms"] = 40
+    bridge.effects_config = config
+    bridge.director = None
+    bridge.call = SimpleNamespace(timeline=_FakeTimeline())
+    resolutions: list[str] = []
+
+    async def commit(candidate: InterruptionCandidate, *, reason: str) -> None:
+        resolutions.append(reason)
+        candidate.committed = True
+        candidate.done.set()
+
+    async def reject(candidate: InterruptionCandidate, *, reason: str) -> None:
+        resolutions.append(reason)
+        candidate.done.set()
+
+    bridge._commit_interruption_candidate = commit
+    bridge._reject_interruption_candidate = reject
+
+    async def exercise() -> None:
+        candidate = InterruptionCandidate(
+            director_generation=0,
+            interrupted_actor_generation=1,
+            started_at=asyncio.get_running_loop().time(),
+        )
+        await bridge._resolve_interruption_candidate(candidate)
+
+    asyncio.run(exercise())
+    assert resolutions == ["local_vad_confirmed"]
+
+
+def test_semantic_backchannel_resumes_paused_actor_media() -> None:
+    commands: list[str] = []
+    bridge = object.__new__(AsteriskGeminiBridge)
+    config = default_effects_config(enabled=False)
+    config["semantic_interruption"]["enabled"] = True
+    config["natural_interruption"]["confirm_ms"] = 40
+    config["semantic_interruption"]["decision_timeout_ms"] = 100
+    bridge.effects_config = config
+    bridge.call = SimpleNamespace(timeline=_FakeTimeline())
+
+    async def command(name: str, **_kwargs: object) -> None:
+        commands.append(name)
+
+    bridge.protocol = SimpleNamespace(command=command)
+    bridge._interruption_lock = asyncio.Lock()
+    bridge._duck_current_db = 0.0
+    bridge._duck_target_db = 0.0
+    bridge._duck_transition_remaining_ms = 0.0
+    decision = SimpleNamespace(
+        intent="BACKCHANNEL",
+        confidence=0.99,
+        resume_policy="RESUME",
+    )
+    bridge.director = SimpleNamespace(wait_for_interruption=_async_result(decision))
+
+    async def commit(candidate: InterruptionCandidate, *, reason: str) -> None:
+        raise AssertionError(f"unexpected commit: {reason}")
+
+    bridge._commit_interruption_candidate = commit
+
+    async def exercise() -> None:
+        now = asyncio.get_running_loop().time()
+        candidate = InterruptionCandidate(
+            director_generation=1,
+            interrupted_actor_generation=1,
+            started_at=now - 0.2,
+            speech_ended_at=now,
+            media_paused=True,
+        )
+        candidate.speech_ended.set()
+        await bridge._resolve_interruption_candidate(candidate)
+        assert candidate.resolution == "backchannel"
+
+    asyncio.run(exercise())
+    assert commands == ["CONTINUE_MEDIA"]
+
+
+def test_backchannel_audio_requires_caller_to_resume() -> None:
+    bridge = object.__new__(AsteriskGeminiBridge)
+    bridge.effects_config = default_effects_config(enabled=False)
+    bridge.effects_config["listener_backchannels"]["enabled"] = True
+    bridge._backchannel_opportunities = {}
+    bridge.call = SimpleNamespace(timeline=_FakeTimeline())
+
+    async def exercise() -> None:
+        opportunity = BackchannelOpportunity(
+            generation=7,
+            created_at=asyncio.get_running_loop().time(),
+        )
+        bridge._backchannel_opportunities[7] = opportunity
+        wait = asyncio.create_task(bridge._await_backchannel_confirmation(7))
+        await asyncio.sleep(0)
+        opportunity.confirmed = True
+        opportunity.decision.set()
+        assert await wait
+
+        rejected = BackchannelOpportunity(
+            generation=8,
+            created_at=asyncio.get_running_loop().time(),
+            rejected=True,
+        )
+        rejected.decision.set()
+        bridge._backchannel_opportunities[8] = rejected
+        assert not await bridge._await_backchannel_confirmation(8)
+
+    asyncio.run(exercise())
+
+
+def test_stale_latency_filler_is_rejected_after_actor_generation_changes() -> None:
+    bridge = object.__new__(AsteriskGeminiBridge)
+    config = default_effects_config(enabled=False)
+    config["latency_fillers"]["enabled"] = True
+    bridge.effects_config = config
+    bridge._active_filler_actor_generation = 1
+    bridge._filler_requested = {1}
+    bridge._fillers_played_by_generation = {1: 0}
+    bridge.call = SimpleNamespace(
+        detector=SimpleNamespace(
+            turn_open=False,
+            bot_speaking=False,
+        ),
+        gemini=SimpleNamespace(
+            generation=2,
+            bot_audio_active=asyncio.Event(),
+        ),
+    )
+    packet = SimpleNamespace(kind="filler")
+
+    async def exercise() -> None:
+        assert not bridge._director_audio_allowed(packet)
+
+    asyncio.run(exercise())
+
+
 async def _async_noop(*_args: object, **_kwargs: object) -> None:
     return None
+
+
+def _async_result(value: object):
+    async def result(*_args: object, **_kwargs: object) -> object:
+        return value
+
+    return result

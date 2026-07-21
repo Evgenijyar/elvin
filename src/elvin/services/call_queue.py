@@ -15,7 +15,7 @@ from elvin.media.runtime import (
     VoiceCallIdentity,
     VoiceRuntime,
 )
-from elvin.services.conversation_effects import any_effect_enabled
+from elvin.services.conversation_effects import director_required
 from elvin.services.call_outcomes import (
     NO_ANSWER_KEY,
     destination_for_outcome,
@@ -131,7 +131,10 @@ class CallQueueManager:
         robot = await self.store.get_robot(assignment["robot_id"])
         if robot is None:
             raise CallQueueError("Профиль робота не найден.")
-        if any_effect_enabled(robot.get("effects_config")) and not await self._gemini_director_key():
+        if (
+            director_required(robot.get("effects_config"))
+            and not await self._gemini_director_key()
+        ):
             raise CallQueueError(
                 "Gemini API key «Режиссёр» не настроен, но у робота включены эффекты."
             )
@@ -302,7 +305,10 @@ class CallQueueManager:
                     if not actor_api_key:
                         raise CallQueueError("Gemini API key «Актёр» не настроен.")
                     director_api_key = await self._gemini_director_key()
-                    if any_effect_enabled(robot.get("effects_config")) and not director_api_key:
+                    if (
+                        director_required(robot.get("effects_config"))
+                        and not director_api_key
+                    ):
                         raise CallQueueError(
                             "Gemini API key «Режиссёр» не настроен, но у робота включены эффекты."
                         )
@@ -615,9 +621,7 @@ class CallQueueManager:
         return configured.get_secret_value().strip() if configured else ""
 
     async def _gemini_director_key(self) -> str:
-        stored = (
-            await self.store.get_setting("gemini_director_api_key") or ""
-        ).strip()
+        stored = (await self.store.get_setting("gemini_director_api_key") or "").strip()
         if stored:
             return stored
         configured = self.settings.gemini_director_api_key

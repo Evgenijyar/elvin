@@ -15,7 +15,11 @@ from elvin.media.conversation_audio import ConversationAudioEffects
 from elvin.media.turn_detector import LocalTurnDetector, TurnDetectorConfig
 from elvin.observability.frame_trace import FrameTraceWriter
 from elvin.observability.timeline import CallTimeline
-from elvin.services.conversation_effects import any_effect_enabled, normalize_effects_config
+from elvin.services.conversation_effects import (
+    director_required,
+    enabled_effect_keys,
+    normalize_effects_config,
+)
 
 logger = logging.getLogger("elvin.voice_runtime")
 
@@ -78,7 +82,7 @@ class PreparedVoiceCall:
             timeline=self.timeline,
         )
         self.director: GeminiDirectorSession | None = None
-        if any_effect_enabled(self.effects_config):
+        if director_required(self.effects_config):
             if not director_api_key:
                 raise RuntimeError(
                     "Gemini API key «Режиссёр» не настроен, но у робота включены эффекты."
@@ -104,6 +108,8 @@ class PreparedVoiceCall:
             "VOICE_SESSION_PREPARING",
             lead_id=self.identity.lead_id,
             robot_id=self.identity.robot_id,
+            effects=enabled_effect_keys(self.effects_config),
+            director_required=self.director is not None,
         )
         self.background_audio = await LoopingBackgroundAudio.load(
             self.background_audio_path,
@@ -195,6 +201,5 @@ def preload_voice_runtime() -> None:
     turn = LocalSmartTurnAnalyzerV3(sample_rate=16_000)
     turn.set_sample_rate(16_000)
     logger.warning(
-        "Pipecat voice runtime preloaded: Silero VAD + Smart Turn v3 + "
-        "pipecat-asterisk"
+        "Pipecat voice runtime preloaded: Silero VAD + Smart Turn v3 + pipecat-asterisk"
     )

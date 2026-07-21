@@ -14,11 +14,13 @@ from starlette.websockets import WebSocketDisconnect
 
 from elvin.media.audio import Pcm24To16Resampler, PlaybackEchoGuard
 from elvin.media.conversation_audio import (
+    apply_gain_db,
     apply_gain_percent,
     apply_gain_ramp_db,
     duration_ms,
 )
 from elvin.media.runtime import PreparedVoiceCall
+from elvin.services.conversation_effects import any_effect_enabled
 
 logger = logging.getLogger("elvin.asterisk")
 
@@ -32,8 +34,6 @@ class AsteriskMediaInfo:
     channel: str = ""
 
 
-
-
 @dataclass(slots=True)
 class InterruptionCandidate:
     director_generation: int
@@ -41,15 +41,27 @@ class InterruptionCandidate:
     started_at: float
     audio: bytearray = field(default_factory=bytearray)
     speech_ended_at: float | None = None
+    speech_ended: asyncio.Event = field(default_factory=asyncio.Event)
     committed: bool = False
     resolution: str = "PENDING"
     resume_policy: str = "DISCARD"
+    director_decision: Any | None = None
+    media_paused: bool = False
     done: asyncio.Event = field(default_factory=asyncio.Event)
     task: asyncio.Task[None] | None = None
 
     def elapsed_ms(self, now: float) -> float:
         end = self.speech_ended_at if self.speech_ended_at is not None else now
         return max(0.0, (end - self.started_at) * 1000.0)
+
+
+@dataclass(slots=True)
+class BackchannelOpportunity:
+    generation: int
+    created_at: float
+    confirmed: bool = False
+    rejected: bool = False
+    decision: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 class AsteriskProtocol:
@@ -113,16 +125,10 @@ class AsteriskProtocol:
             # A barge-in can happen while MEDIA_XOFF is active. Re-check the
             # generation after the wait so stale audio is never released into
             # the channel after FLUSH_MEDIA.
-            if (
-                generation is not None
-                and generation != self.call.gemini.generation
-            ):
+            if generation is not None and generation != self.call.gemini.generation:
                 return False
             async with self.send_lock:
-                if (
-                    generation is not None
-                    and generation != self.call.gemini.generation
-                ):
+                if generation is not None and generation != self.call.gemini.generation:
                     return False
                 await self.websocket.send_bytes(chunk)
         return True
@@ -163,9 +169,7 @@ class AsteriskProtocol:
             if waiter is not None:
                 waiter.set()
         elif name == "DTMF_END":
-            self.call.timeline.add(
-                "ASTERISK_DTMF", digit=str(event.get("digit") or "")
-            )
+            self.call.timeline.add("ASTERISK_DTMF", digit=str(event.get("digit") or ""))
         elif name in {"HANGUP", "MEDIA_END"}:
             self.call.timeline.add("ASTERISK_HANGUP_EVENT", event=name)
         elif name == "STATUS":
@@ -188,7 +192,7 @@ class AsteriskGeminiBridge:
         self.effects = call.audio_effects
         self.effects_config = call.effects_config
         self.director = call.director
-        self.effects_active = self.director is not None
+        self.effects_active = any_effect_enabled(self.effects_config)
         self._director_degraded = False
         self.director_resampler = Pcm24To16Resampler()
         self._voice_submission_active = asyncio.Event()
@@ -216,6 +220,7 @@ class AsteriskGeminiBridge:
         self._director_quiet_started_at: float | None = None
         self._director_segment_buffer = bytearray()
         self._director_reopen_task: asyncio.Task[None] | None = None
+        self._backchannel_opportunities: dict[int, BackchannelOpportunity] = {}
         self._pending_turn_director_generations: deque[int | None] = deque()
         self._user_speech_started_at = 0.0
         self._backchannels_this_turn = 0
@@ -268,12 +273,6 @@ class AsteriskGeminiBridge:
                 name=f"asterisk-director-output-{self.call.identity.call_id}",
             )
             tasks.add(director_task)
-        if self.effects_config.get("micro_pauses", {}).get("enabled"):
-            boundary_task = asyncio.create_task(
-                self._output_boundary_loop(),
-                name=f"asterisk-output-boundaries-{self.call.identity.call_id}",
-            )
-            tasks.add(boundary_task)
         if self.background_audio is not None:
             background_task = asyncio.create_task(
                 self._background_loop(),
@@ -313,9 +312,7 @@ class AsteriskGeminiBridge:
                 await asyncio.gather(candidate.task, return_exceptions=True)
             if self._director_reopen_task is not None:
                 self._director_reopen_task.cancel()
-                await asyncio.gather(
-                    self._director_reopen_task, return_exceptions=True
-                )
+                await asyncio.gather(self._director_reopen_task, return_exceptions=True)
                 self._director_reopen_task = None
             if self._pending_turn_drain_task is not None:
                 self._pending_turn_drain_task.cancel()
@@ -330,6 +327,10 @@ class AsteriskGeminiBridge:
             await asyncio.gather(*tasks, return_exceptions=True)
             self._director_aux_active.clear()
             self._director_output_buffer.clear()
+            for opportunity in self._backchannel_opportunities.values():
+                opportunity.rejected = True
+                opportunity.decision.set()
+            self._backchannel_opportunities.clear()
             self.call.detector.set_bot_speaking(False)
             self.call.timeline.add("ASTERISK_BRIDGE_CLOSED", result=result)
 
@@ -378,19 +379,19 @@ class AsteriskGeminiBridge:
                 echo_suppressed = self.echo_guard.is_echo(
                     pcm,
                     active=(
-                        self.call.detector.bot_speaking
-                        and not self.call.detector.turn_open
+                        self._director_aux_active.is_set()
+                        or (
+                            self.call.detector.bot_speaking
+                            and not self.call.detector.turn_open
+                        )
                     ),
                 )
                 if (
                     echo_suppressed
-                    and asyncio.get_running_loop().time()
-                    - self._last_echo_event_at
+                    and asyncio.get_running_loop().time() - self._last_echo_event_at
                     >= 0.25
                 ):
-                    self._last_echo_event_at = (
-                        asyncio.get_running_loop().time()
-                    )
+                    self._last_echo_event_at = asyncio.get_running_loop().time()
                     self.call.timeline.add(
                         "PLAYBACK_ECHO_SUPPRESSED",
                         bytes=len(pcm),
@@ -442,18 +443,35 @@ class AsteriskGeminiBridge:
                         if pending_prefix:
                             candidate.audio.extend(pending_prefix)
                         self._interruption_candidate = candidate
-                        natural = self.effects_config.get(
-                            "natural_interruption", {}
+                        natural = self.effects_config.get("natural_interruption", {})
+                        use_natural_envelope = bool(
+                            natural.get("enabled")
+                            or self._effect_enabled("natural_cut")
                         )
                         self._set_duck(
-                            float(natural.get("duck_db", -9)),
+                            (
+                                float(natural.get("duck_db", -9))
+                                if use_natural_envelope
+                                else 0.0
+                            ),
                             int(natural.get("duck_attack_ms", 55)),
                         )
+                        try:
+                            await self.protocol.command("PAUSE_MEDIA")
+                            candidate.media_paused = True
+                            self.call.timeline.add("SOFT_INTERRUPTION_MEDIA_PAUSED")
+                        except Exception as exc:
+                            # Older Asterisk releases did not expose the pause
+                            # command. Continue with the bounded FLUSH fallback
+                            # instead of failing the call.
+                            self.call.timeline.add(
+                                "SOFT_INTERRUPTION_PAUSE_UNAVAILABLE",
+                                error=f"{type(exc).__name__}: {exc}",
+                            )
                         candidate.task = asyncio.create_task(
                             self._resolve_interruption_candidate(candidate),
                             name=(
-                                "asterisk-interruption-"
-                                f"{self.call.identity.call_id}"
+                                f"asterisk-interruption-{self.call.identity.call_id}"
                             ),
                         )
                         self.call.timeline.add(
@@ -467,14 +485,17 @@ class AsteriskGeminiBridge:
                         self.resampler.reset()
                         await self._discard_output_buffer()
                         if (
-                            response_open_generation is not None
-                            and not response_audio_active
-                        ) or (
-                            self._pending_drain_active
-                            and not response_audio_active
-                        ) or (
-                            self._active_activity_started
-                            and not response_audio_active
+                            (
+                                response_open_generation is not None
+                                and not response_audio_active
+                            )
+                            or (
+                                self._pending_drain_active and not response_audio_active
+                            )
+                            or (
+                                self._active_activity_started
+                                and not response_audio_active
+                            )
                         ):
                             self._pending_turn_audio = bytearray()
                             self.call.timeline.add(
@@ -520,9 +541,7 @@ class AsteriskGeminiBridge:
                 if decision.audio_to_gemini:
                     if self.director is not None:
                         if self._current_director_generation is not None:
-                            await self._send_audio_to_director(
-                                decision.audio_to_gemini
-                            )
+                            await self._send_audio_to_director(decision.audio_to_gemini)
                         elif self.call.detector.turn_open:
                             self._director_segment_buffer.extend(
                                 decision.audio_to_gemini
@@ -531,13 +550,9 @@ class AsteriskGeminiBridge:
                     if candidate is not None and not candidate.done.is_set():
                         candidate.audio.extend(decision.audio_to_gemini)
                     elif self._pending_turn_audio is not None:
-                        self._pending_turn_audio.extend(
-                            decision.audio_to_gemini
-                        )
+                        self._pending_turn_audio.extend(decision.audio_to_gemini)
                     elif self._active_activity_started:
-                        await self._send_audio_to_gemini(
-                            decision.audio_to_gemini
-                        )
+                        await self._send_audio_to_gemini(decision.audio_to_gemini)
 
                 if decision.speech_ended:
                     if self._director_reopen_task is not None:
@@ -549,26 +564,26 @@ class AsteriskGeminiBridge:
                         self._current_director_generation
                         or self._last_director_generation_for_turn
                     )
-                    if (
-                        self.director is not None
-                        and self.director.activity_open
-                    ):
+                    if self.director is not None and self.director.activity_open:
                         await self._end_director_activity()
                         director_generation = self.director.generation
-                        self._last_director_generation_for_turn = (
-                            director_generation
-                        )
+                        self._last_director_generation_for_turn = director_generation
                     candidate = self._interruption_candidate
-                    if candidate is not None and not candidate.done.is_set():
+                    if candidate is not None:
                         candidate.speech_ended_at = asyncio.get_running_loop().time()
-                        try:
-                            await asyncio.wait_for(candidate.done.wait(), timeout=2.5)
-                        except TimeoutError:
-                            await self._commit_interruption_candidate(
-                                candidate, reason="resolution_timeout"
-                            )
+                        candidate.speech_ended.set()
+                        if not candidate.done.is_set():
+                            try:
+                                await asyncio.wait_for(
+                                    candidate.done.wait(), timeout=2.5
+                                )
+                            except TimeoutError:
+                                await self._commit_interruption_candidate(
+                                    candidate, reason="resolution_timeout"
+                                )
                         if candidate.committed and self._active_activity_started:
                             if self._effect_enabled("interruption_resume"):
+                                await self._resolve_resume_policy(candidate)
                                 resume = self.effects_config.get(
                                     "interruption_resume", {}
                                 )
@@ -577,26 +592,36 @@ class AsteriskGeminiBridge:
                                 )
                                 if resume_delay_ms > 0:
                                     await asyncio.sleep(resume_delay_ms / 1000.0)
-                                previous_text = self.call.gemini.transcript_for_generation(
-                                    candidate.interrupted_actor_generation
+                                previous_text = (
+                                    self.call.gemini.transcript_for_generation(
+                                        candidate.interrupted_actor_generation
+                                    )
                                 )
-                                max_chars = int(
-                                    resume.get("max_context_chars", 1200)
+                                max_chars = int(resume.get("max_context_chars", 1200))
+                                context = (
+                                    previous_text[-max_chars:] if previous_text else ""
                                 )
-                                context = previous_text[-max_chars:] if previous_text else ""
                                 if candidate.resume_policy == "RESUME":
                                     await self.call.gemini.send_context_hint(
                                         "Перебивание было коротким подтверждением. "
                                         "Если смысл не изменился, продолжи с ближайшей "
                                         "смысловой границы без повторения начала. "
-                                        + ("Незавершённая реплика: " + context if context else "")
+                                        + (
+                                            "Незавершённая реплика: " + context
+                                            if context
+                                            else ""
+                                        )
                                     )
                                 elif candidate.resume_policy == "REFORMULATE":
                                     await self.call.gemini.send_context_hint(
                                         "Собеседник перебил, потому что прежняя формулировка "
                                         "не подошла. Ответь на его последнюю реплику заново, "
                                         "короче и проще. "
-                                        + ("Прежняя реплика: " + context if context else "")
+                                        + (
+                                            "Прежняя реплика: " + context
+                                            if context
+                                            else ""
+                                        )
                                     )
                             actor_generation = self.call.gemini.generation
                             await self.call.gemini.end_activity()
@@ -623,9 +648,9 @@ class AsteriskGeminiBridge:
                     elif self._active_activity_started:
                         actor_generation = self.call.gemini.generation
                         if director_generation is not None:
-                            self._director_generation_for_actor[
-                                actor_generation
-                            ] = director_generation
+                            self._director_generation_for_actor[actor_generation] = (
+                                director_generation
+                            )
                         await self.call.gemini.end_activity()
                         self._mark_actor_turn_ended(
                             actor_generation, director_generation
@@ -638,16 +663,12 @@ class AsteriskGeminiBridge:
         except WebSocketDisconnect:
             return "caller_hangup"
 
-    async def _start_director_activity(
-        self, *, actor_speaking: bool
-    ) -> int | None:
+    async def _start_director_activity(self, *, actor_speaking: bool) -> int | None:
         director = self.director
         if director is None or self._director_degraded:
             return None
         try:
-            return await director.start_activity(
-                actor_speaking=actor_speaking
-            )
+            return await director.start_activity(actor_speaking=actor_speaking)
         except Exception as exc:
             self._degrade_director(exc, operation="start_activity")
             return None
@@ -661,9 +682,7 @@ class AsteriskGeminiBridge:
         except Exception as exc:
             self._degrade_director(exc, operation="end_activity")
 
-    def _degrade_director(
-        self, error: BaseException, *, operation: str
-    ) -> None:
+    def _degrade_director(self, error: BaseException, *, operation: str) -> None:
         if self._director_degraded:
             return
         self._director_degraded = True
@@ -674,6 +693,7 @@ class AsteriskGeminiBridge:
         )
         self._director_aux_active.clear()
         self._director_output_buffer.clear()
+        self._reject_backchannel_opportunities(reason="director_degraded")
         logger.error(
             "Gemini Director degraded during %s; Actor continues: %s: %s",
             operation,
@@ -691,14 +711,25 @@ class AsteriskGeminiBridge:
         speaking = decision.vad_state in {"STARTING", "SPEAKING"}
         if speaking:
             self._director_quiet_started_at = None
+            opportunity = self._latest_backchannel_opportunity()
+            if opportunity is not None and not opportunity.decision.is_set():
+                # A renewed SPEAKING state is the missing causal evidence that
+                # the previous 220 ms pause was actually mid-turn.  Only now
+                # may Director audio be released; a final pause is rejected.
+                opportunity.confirmed = True
+                opportunity.decision.set()
+                self._director_segment_buffer.clear()
+                self.call.timeline.add(
+                    "DIRECTOR_BACKCHANNEL_CONFIRMED",
+                    generation=opportunity.generation,
+                    confirmation_ms=round((now - opportunity.created_at) * 1000.0),
+                )
             if (
                 self.call.detector.turn_open
                 and self._current_director_generation is None
                 and self._director_reopen_task is None
             ):
-                generation = await self._start_director_activity(
-                    actor_speaking=False
-                )
+                generation = await self._start_director_activity(actor_speaking=False)
                 if generation is None:
                     return
                 self._current_director_generation = generation
@@ -708,7 +739,10 @@ class AsteriskGeminiBridge:
                     self._director_segment_buffer.clear()
                     await self._send_audio_to_director(buffered)
             return
-        if decision.speech_ended or decision.vad_state != "QUIET":
+        if decision.speech_ended:
+            self._reject_backchannel_opportunities(reason="caller_turn_ended")
+            return
+        if decision.vad_state != "QUIET":
             return
         if self._current_director_generation is None or not director.activity_open:
             return
@@ -730,9 +764,14 @@ class AsteriskGeminiBridge:
         if quiet_ms < int(config.get("opportunity_silence_ms", 220)):
             return
         generation = self._current_director_generation
+        self._backchannel_opportunities[generation] = BackchannelOpportunity(
+            generation=generation,
+            created_at=now,
+        )
         try:
             await director.mark_midturn_pause()
         except Exception as exc:
+            self._reject_backchannel_opportunities(reason="director_mark_failed")
             self._degrade_director(exc, operation="mark_midturn_pause")
             return
         await self._end_director_activity()
@@ -740,10 +779,7 @@ class AsteriskGeminiBridge:
         self._director_quiet_started_at = None
         self._director_reopen_task = asyncio.create_task(
             self._reopen_director_after_midturn(generation),
-            name=(
-                "director-midturn-reopen-"
-                f"{self.call.identity.call_id}-{generation}"
-            ),
+            name=(f"director-midturn-reopen-{self.call.identity.call_id}-{generation}"),
         )
         self.call.timeline.add(
             "DIRECTOR_MIDTURN_PAUSE",
@@ -759,15 +795,45 @@ class AsteriskGeminiBridge:
         config = self.effects_config.get("listener_backchannels", {})
         timeout_ms = int(config.get("max_audio_ms", 750)) + 1200
         try:
-            await director.wait_for_turn_complete(generation, timeout_ms)
+            deadline = asyncio.get_running_loop().time() + timeout_ms / 1000.0
+            completed = False
+            while asyncio.get_running_loop().time() < deadline:
+                opportunity = self._backchannel_opportunities.get(generation)
+                if opportunity is not None and opportunity.rejected:
+                    return
+                if await director.wait_for_turn_complete(generation, 50):
+                    completed = True
+                    break
+            if not completed:
+                self._reject_backchannel_opportunities(
+                    reason="director_turn_timeout",
+                    generation=generation,
+                )
+                return
+            opportunity = self._backchannel_opportunities.get(generation)
+            if opportunity is None:
+                return
+            if not opportunity.decision.is_set():
+                confirmation_ms = int(config.get("resume_confirmation_ms", 1100))
+                try:
+                    await asyncio.wait_for(
+                        opportunity.decision.wait(),
+                        timeout=confirmation_ms / 1000.0,
+                    )
+                except TimeoutError:
+                    self._reject_backchannel_opportunities(
+                        reason="no_caller_resume",
+                        generation=generation,
+                    )
+                    return
+            if not opportunity.confirmed or opportunity.rejected:
+                return
             if self._closed:
                 return
             buffered = bytes(self._director_segment_buffer)
-            if not self.call.detector.turn_open and not buffered:
+            if not self.call.detector.turn_open:
                 return
-            next_generation = await self._start_director_activity(
-                actor_speaking=False
-            )
+            next_generation = await self._start_director_activity(actor_speaking=False)
             if next_generation is None:
                 return
             self._current_director_generation = next_generation
@@ -783,15 +849,45 @@ class AsteriskGeminiBridge:
             if self._director_reopen_task is current:
                 self._director_reopen_task = None
 
+    def _latest_backchannel_opportunity(
+        self,
+    ) -> BackchannelOpportunity | None:
+        pending = [
+            item
+            for item in self._backchannel_opportunities.values()
+            if not item.confirmed and not item.rejected
+        ]
+        return max(pending, key=lambda item: item.generation, default=None)
+
+    def _reject_backchannel_opportunities(
+        self, *, reason: str, generation: int | None = None
+    ) -> None:
+        for item_generation, opportunity in self._backchannel_opportunities.items():
+            if generation is not None and item_generation != generation:
+                continue
+            if opportunity.confirmed or opportunity.rejected:
+                continue
+            opportunity.rejected = True
+            opportunity.decision.set()
+            self.call.timeline.add(
+                "DIRECTOR_BACKCHANNEL_REJECTED",
+                generation=item_generation,
+                reason=reason,
+            )
+
     def _effect_enabled(self, key: str) -> bool:
         return bool(self.effects_config.get(key, {}).get("enabled"))
 
     def _soft_interruption_enabled(self) -> bool:
-        return self._effect_enabled("natural_interruption") or (
-            self.director is not None
-            and (
-                self._effect_enabled("semantic_interruption")
-                or self._effect_enabled("interruption_resume")
+        return (
+            self._effect_enabled("natural_interruption")
+            or self._effect_enabled("natural_cut")
+            or (
+                self.director is not None
+                and (
+                    self._effect_enabled("semantic_interruption")
+                    or self._effect_enabled("interruption_resume")
+                )
             )
         )
 
@@ -809,13 +905,12 @@ class AsteriskGeminiBridge:
         packet_ms = max(0.1, duration_ms(pcm))
         if self._duck_transition_remaining_ms <= 0:
             self._duck_current_db = self._duck_target_db
-            return apply_gain_ramp_db(
-                pcm, self._duck_current_db, self._duck_current_db
-            )
+            return apply_gain_ramp_db(pcm, self._duck_current_db, self._duck_current_db)
         fraction = min(1.0, packet_ms / self._duck_transition_remaining_ms)
-        end_db = self._duck_current_db + (
-            self._duck_target_db - self._duck_current_db
-        ) * fraction
+        end_db = (
+            self._duck_current_db
+            + (self._duck_target_db - self._duck_current_db) * fraction
+        )
         result = apply_gain_ramp_db(pcm, self._duck_current_db, end_db)
         self._duck_current_db = end_db
         self._duck_transition_remaining_ms = max(
@@ -834,9 +929,7 @@ class AsteriskGeminiBridge:
             return
         try:
             for offset in range(0, len(pcm16), chunk_bytes):
-                await director.send_audio(
-                    pcm16[offset : offset + chunk_bytes]
-                )
+                await director.send_audio(pcm16[offset : offset + chunk_bytes])
         except Exception as exc:
             self._degrade_director(exc, operation="send_audio")
 
@@ -867,9 +960,7 @@ class AsteriskGeminiBridge:
             and actor_generation not in tasks
         ):
             task = asyncio.create_task(
-                self._latency_filler_watch(
-                    actor_generation, director_generation
-                ),
+                self._latency_filler_watch(actor_generation, director_generation),
                 name=(
                     "asterisk-latency-filler-"
                     f"{self.call.identity.call_id}-{actor_generation}"
@@ -902,16 +993,18 @@ class AsteriskGeminiBridge:
             self._filler_requested.add(actor_generation)
             self._active_filler_actor_generation = actor_generation
             try:
-                await self.director.request_latency_filler()
+                filler_generation = await self.director.request_latency_filler()
             except Exception as exc:
-                self._degrade_director(
-                    exc, operation="request_latency_filler"
-                )
+                self._degrade_director(exc, operation="request_latency_filler")
+                return
+            if filler_generation is None:
+                self._filler_requested.discard(actor_generation)
+                self._active_filler_actor_generation = None
                 return
             self.call.timeline.add(
                 "LATENCY_FILLER_REQUESTED",
                 actor_generation=actor_generation,
-                director_generation=director_generation,
+                director_generation=filler_generation,
                 trigger_ms=trigger_ms,
             )
         finally:
@@ -925,44 +1018,53 @@ class AsteriskGeminiBridge:
         confirm_ms = int(natural.get("confirm_ms", 140))
         fallback_ms = int(natural.get("fallback_takeover_ms", 360))
         decision_timeout_ms = int(semantic.get("decision_timeout_ms", 320))
-        max_backchannel_ms = int(semantic.get("max_backchannel_ms", 650))
-        decision_task: asyncio.Task[Any] | None = None
+        semantic_enabled = bool(
+            self.director is not None
+            and candidate.director_generation
+            and semantic.get("enabled")
+        )
         try:
-            if self.director is not None and candidate.director_generation:
-                decision_task = asyncio.create_task(
-                    self.director.wait_for_interruption(
-                        candidate.director_generation, decision_timeout_ms
-                    )
-                )
             await asyncio.sleep(max(0, confirm_ms) / 1000.0)
-            decision = None
-            if decision_task is not None:
-                remaining = max(0.01, (decision_timeout_ms - confirm_ms) / 1000.0)
+            if candidate.done.is_set():
+                return
+            if not semantic_enabled:
+                # Local VAD has already supplied its own start confirmation.
+                # A deterministic effect must not wait for a Director tool
+                # that was never declared; this is the path used by the
+                # standalone "soft interruption" switch.
+                await self._commit_interruption_candidate(
+                    candidate, reason="local_vad_confirmed"
+                )
+                return
+
+            elapsed = candidate.elapsed_ms(asyncio.get_running_loop().time())
+            remaining = max(0.0, fallback_ms - elapsed) / 1000.0
+            if candidate.speech_ended_at is None and remaining > 0:
                 try:
-                    decision = await asyncio.wait_for(
-                        asyncio.shield(decision_task), timeout=remaining
+                    await asyncio.wait_for(
+                        candidate.speech_ended.wait(), timeout=remaining
                     )
                 except TimeoutError:
-                    decision = None
+                    pass
+            if candidate.speech_ended_at is None:
+                # Semantic classification cannot complete before ActivityEnd.
+                # Sustained speech is therefore treated as takeover locally,
+                # keeping the physical barge-in bounded by fallback_ms.
+                await self._commit_interruption_candidate(
+                    candidate, reason="sustained_speech_takeover"
+                )
+                return
 
+            decision = await self.director.wait_for_interruption(
+                candidate.director_generation, decision_timeout_ms
+            )
             if decision is not None:
+                candidate.director_decision = decision
                 intent = decision.intent
                 confidence = decision.confidence
-                resume = self.effects_config.get("interruption_resume", {})
-                policy = decision.resume_policy
-                if policy == "RESUME" and confidence >= float(
-                    resume.get("resume_confidence", 0.82)
-                ):
-                    candidate.resume_policy = "RESUME"
-                elif policy == "REFORMULATE" and confidence >= float(
-                    resume.get("reformulate_confidence", 0.76)
-                ):
-                    candidate.resume_policy = "REFORMULATE"
-                else:
-                    candidate.resume_policy = "DISCARD"
-                if (
-                    intent == "TAKEOVER"
-                    and confidence >= float(semantic.get("takeover_confidence", 0.78))
+                self._set_resume_policy(candidate, decision)
+                if intent == "TAKEOVER" and confidence >= float(
+                    semantic.get("takeover_confidence", 0.78)
                 ):
                     await self._commit_interruption_candidate(
                         candidate, reason="director_takeover"
@@ -977,46 +1079,32 @@ class AsteriskGeminiBridge:
                             0.82,
                         )
                     )
-                    if confidence >= threshold:
-                        while (
-                            candidate.speech_ended_at is None
-                            and candidate.elapsed_ms(asyncio.get_running_loop().time())
-                            < max_backchannel_ms
-                        ):
-                            await asyncio.sleep(0.01)
-                        if (
-                            candidate.speech_ended_at is not None
-                            and candidate.elapsed_ms(candidate.speech_ended_at)
-                            <= max_backchannel_ms
-                        ):
-                            await self._reject_interruption_candidate(
-                                candidate, reason=intent.lower()
-                            )
-                            return
-                        await self._commit_interruption_candidate(
-                            candidate, reason="backchannel_became_takeover"
+                    within_backchannel_limit = (
+                        intent != "BACKCHANNEL"
+                        or candidate.elapsed_ms(candidate.speech_ended_at)
+                        <= int(semantic.get("max_backchannel_ms", 650))
+                    )
+                    if confidence >= threshold and within_backchannel_limit:
+                        await self._reject_interruption_candidate(
+                            candidate, reason=intent.lower()
                         )
                         return
                 if intent == "UNCERTAIN":
                     await asyncio.sleep(
-                        max(0, int(semantic.get("uncertain_hold_ms", 180)))
-                        / 1000.0
+                        max(0, int(semantic.get("uncertain_hold_ms", 180))) / 1000.0
                     )
 
-            elapsed = candidate.elapsed_ms(asyncio.get_running_loop().time())
-            if elapsed < fallback_ms and candidate.speech_ended_at is None:
-                await asyncio.sleep((fallback_ms - elapsed) / 1000.0)
-            final_elapsed = candidate.elapsed_ms(asyncio.get_running_loop().time())
-            if (
-                candidate.speech_ended_at is not None
-                and final_elapsed <= max_backchannel_ms
-            ):
+            final_elapsed = candidate.elapsed_ms(
+                candidate.speech_ended_at or asyncio.get_running_loop().time()
+            )
+            minimum_spoken_ms = max(80, min(confirm_ms, 160))
+            if final_elapsed < minimum_spoken_ms:
                 await self._reject_interruption_candidate(
-                    candidate, reason="short_unconfirmed"
+                    candidate, reason="brief_unclassified_sound"
                 )
             else:
                 await self._commit_interruption_candidate(
-                    candidate, reason="fallback_takeover"
+                    candidate, reason="unclassified_spoken_interruption"
                 )
         except asyncio.CancelledError:
             raise
@@ -1028,10 +1116,43 @@ class AsteriskGeminiBridge:
             await self._commit_interruption_candidate(
                 candidate, reason="director_error_fallback"
             )
-        finally:
-            if decision_task is not None and not decision_task.done():
-                decision_task.cancel()
-                await asyncio.gather(decision_task, return_exceptions=True)
+
+    def _set_resume_policy(
+        self, candidate: InterruptionCandidate, decision: Any
+    ) -> None:
+        resume = self.effects_config.get("interruption_resume", {})
+        if not resume.get("enabled"):
+            candidate.resume_policy = "DISCARD"
+            return
+        confidence = float(decision.confidence)
+        policy = str(decision.resume_policy or "DISCARD").upper()
+        if policy == "RESUME" and confidence >= float(
+            resume.get("resume_confidence", 0.82)
+        ):
+            candidate.resume_policy = "RESUME"
+        elif policy == "REFORMULATE" and confidence >= float(
+            resume.get("reformulate_confidence", 0.76)
+        ):
+            candidate.resume_policy = "REFORMULATE"
+        else:
+            candidate.resume_policy = "DISCARD"
+
+    async def _resolve_resume_policy(self, candidate: InterruptionCandidate) -> None:
+        if self.director is None or not candidate.director_generation:
+            return
+        decision = candidate.director_decision
+        if decision is None:
+            timeout_ms = int(
+                self.effects_config.get("interruption_resume", {}).get(
+                    "decision_timeout_ms", 360
+                )
+            )
+            decision = await self.director.wait_for_interruption(
+                candidate.director_generation, timeout_ms
+            )
+            candidate.director_decision = decision
+        if decision is not None:
+            self._set_resume_policy(candidate, decision)
 
     async def _reject_interruption_candidate(
         self, candidate: InterruptionCandidate, *, reason: str
@@ -1042,6 +1163,9 @@ class AsteriskGeminiBridge:
             candidate.resolution = reason
             natural = self.effects_config.get("natural_interruption", {})
             self._set_duck(0.0, int(natural.get("recovery_ms", 120)))
+            if candidate.media_paused:
+                await self.protocol.command("CONTINUE_MEDIA")
+                candidate.media_paused = False
             candidate.done.set()
             self.call.timeline.add(
                 "SOFT_INTERRUPTION_REJECTED",
@@ -1068,18 +1192,22 @@ class AsteriskGeminiBridge:
             await self._discard_output_buffer()
             actor_generation = await self.call.gemini.start_activity()
             if candidate.director_generation:
-                self._director_generation_for_actor[
-                    actor_generation
-                ] = candidate.director_generation
+                self._director_generation_for_actor[actor_generation] = (
+                    candidate.director_generation
+                )
             await self.protocol.command("FLUSH_MEDIA")
+            candidate.media_paused = False
             self.echo_guard.clear()
             release_tail = self.effects.release_tail()
+            natural = self.effects_config.get("natural_interruption", {})
+            if release_tail:
+                release_tail = apply_gain_db(
+                    release_tail, float(natural.get("duck_db", -9))
+                )
             if release_tail:
                 wire_tail = release_tail
                 if self.background_audio is not None:
-                    wire_tail = await self.background_audio.mix_with_voice(
-                        release_tail
-                    )
+                    wire_tail = await self.background_audio.mix_with_voice(release_tail)
                 self._voice_submission_active.set()
                 try:
                     await self.protocol.send_media(wire_tail)
@@ -1138,9 +1266,7 @@ class AsteriskGeminiBridge:
         # 40 ms at 16 kHz, mono, signed 16-bit PCM.
         chunk_bytes = 1_280
         for offset in range(0, len(pcm16), chunk_bytes):
-            await self.call.gemini.send_audio(
-                pcm16[offset : offset + chunk_bytes]
-            )
+            await self.call.gemini.send_audio(pcm16[offset : offset + chunk_bytes])
 
     async def _drain_pending_turns(self) -> None:
         while self._pending_turns and not self._closed:
@@ -1194,15 +1320,13 @@ class AsteriskGeminiBridge:
                 await self._discard_output_buffer()
                 actor_generation = await self.call.gemini.start_activity()
                 if director_generation is not None:
-                    self._director_generation_for_actor[
-                        actor_generation
-                    ] = director_generation
+                    self._director_generation_for_actor[actor_generation] = (
+                        director_generation
+                    )
                 activity_started = True
                 await self._send_audio_to_gemini(pending_audio)
                 await self.call.gemini.end_activity()
-                self._mark_actor_turn_ended(
-                    actor_generation, director_generation
-                )
+                self._mark_actor_turn_ended(actor_generation, director_generation)
                 activity_started = False
                 sent = True
                 self.call.timeline.add(
@@ -1217,9 +1341,7 @@ class AsteriskGeminiBridge:
                         self, "_pending_turn_director_generations", None
                     )
                     if pending_director_generations is not None:
-                        pending_director_generations.appendleft(
-                            director_generation
-                        )
+                        pending_director_generations.appendleft(director_generation)
                 if activity_started:
                     try:
                         await asyncio.shield(self.call.gemini.end_activity())
@@ -1236,9 +1358,7 @@ class AsteriskGeminiBridge:
                         self, "_pending_turn_director_generations", None
                     )
                     if pending_director_generations is not None:
-                        pending_director_generations.appendleft(
-                            director_generation
-                        )
+                        pending_director_generations.appendleft(director_generation)
                 if activity_started:
                     try:
                         await self.call.gemini.end_activity()
@@ -1262,8 +1382,16 @@ class AsteriskGeminiBridge:
             return
         if self._director_aux_active.is_set():
             maximum_ms = max(
-                int(self.effects_config.get("listener_backchannels", {}).get("max_audio_ms", 750)),
-                int(self.effects_config.get("latency_fillers", {}).get("max_audio_ms", 1200)),
+                int(
+                    self.effects_config.get("listener_backchannels", {}).get(
+                        "max_audio_ms", 750
+                    )
+                ),
+                int(
+                    self.effects_config.get("latency_fillers", {}).get(
+                        "max_audio_ms", 1200
+                    )
+                ),
             )
             deadline = asyncio.get_running_loop().time() + (maximum_ms + 250) / 1000.0
             while (
@@ -1282,9 +1410,7 @@ class AsteriskGeminiBridge:
             and not self._director_degraded
             and director_generation is not None
         ):
-            delay_config = self.effects_config.get(
-                "adaptive_response_delay", {}
-            )
+            delay_config = self.effects_config.get("adaptive_response_delay", {})
             wait_ms = int(delay_config.get("director_wait_ms", 240))
             if any(
                 self._effect_enabled(key)
@@ -1298,23 +1424,31 @@ class AsteriskGeminiBridge:
                     director_generation, wait_ms
                 )
         delay_config = self.effects_config.get("adaptive_response_delay", {})
+        pace_config = self.effects_config.get("pace_matching", {})
         requested_delay: int | None = None
         if plan is not None:
-            self.effects.set_pace(plan.pace_percent)
+            if plan.confidence >= float(pace_config.get("plan_confidence", 0.65)):
+                self.effects.set_pace(plan.pace_percent)
+            else:
+                self.effects.set_pace(float(pace_config.get("default_percent", 100)))
             self._micro_pause_styles[generation] = plan.micro_pause_style
             self._micro_pause_confidence[generation] = plan.confidence
-            if plan.user_state in {"THINKING", "UPSET"}:
-                requested_delay = int(
-                    delay_config.get("thinking_pause_ms", 460)
-                )
+            if plan.confidence < float(delay_config.get("plan_confidence", 0.65)):
+                requested_delay = int(delay_config.get("direct_answer_ms", 180))
+            elif plan.user_state in {"THINKING", "UPSET"}:
+                requested_delay = int(delay_config.get("thinking_pause_ms", 460))
             else:
                 requested_delay = plan.response_delay_ms
         else:
-            pace = self.effects_config.get("pace_matching", {})
-            self.effects.set_pace(float(pace.get("default_percent", 100)))
+            self.effects.set_pace(float(pace_config.get("default_percent", 100)))
             self._micro_pause_styles[generation] = "NONE"
             self._micro_pause_confidence[generation] = 0.0
             requested_delay = int(delay_config.get("direct_answer_ms", 180))
+
+        self.effects.set_micro_pause_profile(
+            self._micro_pause_styles.get(generation, "NONE"),
+            self._micro_pause_confidence.get(generation, 0.0),
+        )
 
         requested_seconds = self.effects.response_delay(requested_delay)
         ended_at = self._actor_turn_ended_at.get(generation)
@@ -1335,6 +1469,9 @@ class AsteriskGeminiBridge:
             pace_percent=round(self.effects.current_pace_percent, 2),
             micro_pause_style=self._micro_pause_styles.get(generation, "NONE"),
             director_plan=plan is not None,
+            director_confidence=(
+                round(float(plan.confidence), 3) if plan is not None else None
+            ),
         )
 
     async def _output_loop(self) -> None:
@@ -1373,13 +1510,13 @@ class AsteriskGeminiBridge:
                 if self.effects_active:
                     pcm16 = self.effects.process_actor_audio(pcm16)
                     pcm16 = self._apply_duck(pcm16)
-                    pause = self.effects.take_pause()
-                    if pause:
-                        pcm16 = pause + pcm16
+                    inserted_pause_ms = self.effects.take_inserted_pause_ms()
+                    if inserted_pause_ms:
                         self.call.timeline.add(
                             "ACTOR_MICRO_PAUSE",
                             generation=packet.generation,
-                            duration_ms=round(duration_ms(pause)),
+                            duration_ms=inserted_pause_ms,
+                            source="acoustic_gap",
                         )
                 await self._send_output_audio(
                     pcm16,
@@ -1387,34 +1524,6 @@ class AsteriskGeminiBridge:
                 )
             finally:
                 self.call.gemini.output_audio.task_done()
-
-    async def _output_boundary_loop(self) -> None:
-        while True:
-            generation, kind = await self.call.gemini.output_boundary_queue.get()
-            try:
-                if generation != self.call.gemini.generation:
-                    continue
-                deadline = asyncio.get_running_loop().time() + 0.5
-                while (
-                    generation not in self._micro_pause_styles
-                    and asyncio.get_running_loop().time() < deadline
-                ):
-                    await asyncio.sleep(0.01)
-                style = self._micro_pause_styles.get(generation, "NONE")
-                confidence = self._micro_pause_confidence.get(generation, 0.0)
-                threshold = float(
-                    self.effects_config.get("micro_pauses", {}).get(
-                        "boundary_confidence", 0.72
-                    )
-                )
-                if style == "NONE" or confidence < threshold:
-                    continue
-                effective_kind = kind
-                if style == "LIGHT" and kind == "medium":
-                    effective_kind = "short"
-                self.effects.schedule_pause(effective_kind)
-            finally:
-                self.call.gemini.output_boundary_queue.task_done()
 
     async def _director_output_loop(self) -> None:
         director = self.director
@@ -1442,11 +1551,19 @@ class AsteriskGeminiBridge:
             try:
                 if packet.utterance_id in self._director_audio_rejected_ids:
                     if packet.final:
-                        self._director_audio_rejected_ids.discard(
-                            packet.utterance_id
-                        )
+                        self._director_audio_rejected_ids.discard(packet.utterance_id)
+                        if packet.kind == "backchannel":
+                            self._backchannel_opportunities.pop(packet.generation, None)
                     continue
                 if packet.utterance_id not in self._director_audio_allowed_ids:
+                    if (
+                        packet.kind == "backchannel"
+                        and not await self._await_backchannel_confirmation(
+                            packet.generation
+                        )
+                    ):
+                        self._director_audio_rejected_ids.add(packet.utterance_id)
+                        continue
                     if not self._director_audio_allowed(packet):
                         self._director_audio_rejected_ids.add(packet.utterance_id)
                         continue
@@ -1466,20 +1583,14 @@ class AsteriskGeminiBridge:
                 if packet.pcm24:
                     pcm16 = self.director_resampler.convert(packet.pcm24)
                     if pcm16:
-                        pcm16 = apply_gain_percent(
-                            pcm16, packet.volume_percent
-                        )
+                        pcm16 = apply_gain_percent(pcm16, packet.volume_percent)
                         await self._send_auxiliary_audio(
                             pcm16, kind=packet.kind, flush=False
                         )
                 if packet.final:
-                    await self._send_auxiliary_audio(
-                        b"", kind=packet.kind, flush=True
-                    )
+                    await self._send_auxiliary_audio(b"", kind=packet.kind, flush=True)
                     self.director_resampler.reset()
-                    self._director_audio_allowed_ids.discard(
-                        packet.utterance_id
-                    )
+                    self._director_audio_allowed_ids.discard(packet.utterance_id)
                     self._director_aux_active.clear()
                     now = asyncio.get_running_loop().time()
                     self._last_backchannel_at = now
@@ -1488,6 +1599,8 @@ class AsteriskGeminiBridge:
                         if actor_generation is not None:
                             self._filler_requested.discard(actor_generation)
                         self._active_filler_actor_generation = None
+                    elif packet.kind == "backchannel":
+                        self._backchannel_opportunities.pop(packet.generation, None)
                     self.call.timeline.add(
                         "DIRECTOR_AUDIO_PLAYED",
                         kind=packet.kind,
@@ -1497,6 +1610,27 @@ class AsteriskGeminiBridge:
                     )
             finally:
                 director.output_audio.task_done()
+
+    async def _await_backchannel_confirmation(self, generation: int) -> bool:
+        opportunity = self._backchannel_opportunities.get(generation)
+        if opportunity is None:
+            return False
+        if not opportunity.decision.is_set():
+            timeout_ms = int(
+                self.effects_config.get("listener_backchannels", {}).get(
+                    "resume_confirmation_ms", 1100
+                )
+            )
+            try:
+                await asyncio.wait_for(
+                    opportunity.decision.wait(), timeout=timeout_ms / 1000.0
+                )
+            except TimeoutError:
+                self._reject_backchannel_opportunities(
+                    reason="audio_confirmation_timeout",
+                    generation=generation,
+                )
+        return opportunity.confirmed and not opportunity.rejected
 
     def _director_audio_allowed(self, packet: Any) -> bool:
         kind = str(packet.kind)
@@ -1520,6 +1654,9 @@ class AsteriskGeminiBridge:
                 < int(config.get("min_interval_ms", 7000)) / 1000.0
             ):
                 return False
+            opportunity = self._backchannel_opportunities.get(int(packet.generation))
+            if opportunity is None or not opportunity.confirmed or opportunity.rejected:
+                return False
             candidate = self._interruption_candidate
             return candidate is None or not candidate.committed
         if kind == "filler":
@@ -1532,13 +1669,14 @@ class AsteriskGeminiBridge:
             ):
                 return False
             actor_generation = self._active_filler_actor_generation
-            if actor_generation is None or actor_generation not in self._filler_requested:
+            if (
+                actor_generation is None
+                or actor_generation not in self._filler_requested
+                or actor_generation != self.call.gemini.generation
+            ):
                 return False
             maximum = int(config.get("max_per_turn", 1))
-            return (
-                self._fillers_played_by_generation.get(actor_generation, 0)
-                < maximum
-            )
+            return self._fillers_played_by_generation.get(actor_generation, 0) < maximum
         return False
 
     async def _send_auxiliary_audio(
@@ -1613,17 +1751,13 @@ class AsteriskGeminiBridge:
             return
         wire_chunk = chunk
         background_audio = getattr(self, "background_audio", None)
-        voice_submission_active = getattr(
-            self, "_voice_submission_active", None
-        )
+        voice_submission_active = getattr(self, "_voice_submission_active", None)
         if background_audio is not None:
             wire_chunk = await background_audio.mix_with_voice(chunk)
             if voice_submission_active is not None:
                 voice_submission_active.set()
         try:
-            sent = await self.protocol.send_media(
-                wire_chunk, generation=generation
-            )
+            sent = await self.protocol.send_media(wire_chunk, generation=generation)
             if not sent:
                 return
             self.call.detector.set_bot_speaking(True)
@@ -1646,9 +1780,7 @@ class AsteriskGeminiBridge:
         loop = asyncio.get_running_loop()
         sent_at = loop.time()
         previous_sent_at = getattr(self, "_last_output_submission_at", 0.0)
-        previous_generation = getattr(
-            self, "_last_output_submission_generation", None
-        )
+        previous_generation = getattr(self, "_last_output_submission_generation", None)
         if previous_sent_at and previous_generation == generation:
             actual_gap_ms = (sent_at - previous_sent_at) * 1000.0
             if actual_gap_ms >= 100.0:
@@ -1659,9 +1791,7 @@ class AsteriskGeminiBridge:
                     bytes=len(chunk),
                 )
         self._last_output_submission_at = sent_at
-        self._last_output_submission_generation = (
-            self.call.gemini.generation
-        )
+        self._last_output_submission_generation = self.call.gemini.generation
 
     async def _background_loop(self) -> None:
         """Pace the optional loop only on the Asterisk outbound leg."""
@@ -1676,12 +1806,8 @@ class AsteriskGeminiBridge:
         loop = asyncio.get_running_loop()
         next_tick = loop.time()
         while not self._closed:
-            ptime_seconds = max(
-                0.01, float(self.protocol.info.ptime or 20) / 1000.0
-            )
-            frame_size = max(
-                2, int(self.protocol.info.optimal_frame_size or 640)
-            )
+            ptime_seconds = max(0.01, float(self.protocol.info.ptime or 20) / 1000.0)
+            frame_size = max(2, int(self.protocol.info.optimal_frame_size or 640))
             frame_size -= frame_size % 2
             # Voice batches already carry the mixed background. Do not enqueue
             # separate background frames while model playback is active.
@@ -1735,15 +1861,18 @@ class AsteriskGeminiBridge:
                     pending_audio = self.effects.flush_actor_audio()
                     if pending_audio:
                         pending_audio = self._apply_duck(pending_audio)
-                        pause = self.effects.take_pause()
-                        if pause:
-                            pending_audio = pause + pending_audio
+                        inserted_pause_ms = self.effects.take_inserted_pause_ms()
+                        if inserted_pause_ms:
+                            self.call.timeline.add(
+                                "ACTOR_MICRO_PAUSE",
+                                generation=generation,
+                                duration_ms=inserted_pause_ms,
+                                source="acoustic_gap_flush",
+                            )
                         await self._send_output_audio(
                             pending_audio, generation=generation
                         )
-                await self._send_output_audio(
-                    b"", generation=generation, flush=True
-                )
+                await self._send_output_audio(b"", generation=generation, flush=True)
                 correlation_id = f"elvin-{generation}"
                 try:
                     waiter = await self.protocol.mark(correlation_id)
@@ -1760,9 +1889,7 @@ class AsteriskGeminiBridge:
                         confirmed=False,
                     )
                 self.call.detector.set_bot_speaking(False)
-                transcript = self.call.gemini.transcript_for_generation(
-                    generation
-                )
+                transcript = self.call.gemini.transcript_for_generation(generation)
                 if (
                     self.director is not None
                     and not self._director_degraded
@@ -1771,9 +1898,7 @@ class AsteriskGeminiBridge:
                     try:
                         await self.director.send_actor_transcript(transcript)
                     except Exception as exc:
-                        self._degrade_director(
-                            exc, operation="send_actor_transcript"
-                        )
+                        self._degrade_director(exc, operation="send_actor_transcript")
                 self._actor_turn_ended_at.pop(generation, None)
                 self._micro_pause_styles.pop(generation, None)
                 self._micro_pause_confidence.pop(generation, None)

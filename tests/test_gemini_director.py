@@ -25,17 +25,33 @@ class _FunctionResponse:
         self.kwargs = kwargs
 
 
+class _ActivityStart:
+    pass
+
+
+class _ActivityEnd:
+    pass
+
+
 class _LiveSession:
     def __init__(self) -> None:
         self.responses: list[object] = []
+        self.realtime: list[dict[str, object]] = []
 
     async def send_tool_response(self, *, function_responses: list[object]) -> None:
         self.responses.extend(function_responses)
 
+    async def send_realtime_input(self, **kwargs: object) -> None:
+        self.realtime.append(kwargs)
+
 
 def _install_fake_google() -> None:
     genai_module = ModuleType("google.genai")
-    genai_module.types = SimpleNamespace(FunctionResponse=_FunctionResponse)
+    genai_module.types = SimpleNamespace(
+        FunctionResponse=_FunctionResponse,
+        ActivityStart=_ActivityStart,
+        ActivityEnd=_ActivityEnd,
+    )
     google_module = ModuleType("google")
     google_module.genai = genai_module
     sys.modules["google"] = google_module
@@ -129,3 +145,31 @@ def test_approved_backchannel_audio_is_grouped_and_finalized() -> None:
         assert director._turn_complete_events[3].is_set()
 
     asyncio.run(exercise())
+
+
+def test_latency_filler_uses_a_complete_dedicated_activity() -> None:
+    _install_fake_google()
+    director = _director()
+    director._turn_complete_events[3].set()
+
+    async def exercise() -> None:
+        generation = await director.request_latency_filler()
+        assert generation == 4
+        assert not director.activity_open
+
+    asyncio.run(exercise())
+    assert isinstance(director.session.realtime[0]["activity_start"], _ActivityStart)
+    assert "request_latency_filler" in str(director.session.realtime[1]["text"])
+    assert isinstance(director.session.realtime[2]["activity_end"], _ActivityEnd)
+
+
+def test_director_skips_new_activity_while_previous_turn_is_busy() -> None:
+    _install_fake_google()
+    director = _director()
+
+    async def exercise() -> None:
+        assert await director.start_activity() is None
+        assert director.generation == 3
+
+    asyncio.run(exercise())
+    assert not director.session.realtime

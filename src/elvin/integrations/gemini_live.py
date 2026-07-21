@@ -82,7 +82,6 @@ class GeminiLiveSession:
         self._input_turn = 0
         self._first_audio_seen_for_generation: set[int] = set()
         self._first_audio_events: dict[int, asyncio.Event] = {}
-        self.output_boundary_queue: asyncio.Queue[tuple[int, str]] = asyncio.Queue()
         # Gemini can send the interrupted/turn-complete notifications for the
         # previous model turn after the caller has already started the next
         # activity. Keep that previous generation separate so late packets do
@@ -95,14 +94,15 @@ class GeminiLiveSession:
         self._input_transcripts: dict[int, str] = {}
         self._output_transcripts: dict[int, str] = {}
         self._last_audio_packet_at: dict[int, float] = {}
-        self.output_audio: asyncio.Queue[GeminiAudioPacket] = asyncio.Queue(
-            maxsize=400
-        )
+        self.output_audio: asyncio.Queue[GeminiAudioPacket] = asyncio.Queue(maxsize=400)
         # A receiver failure must wake the media bridge immediately.  Without
         # this event the output task can wait forever on an empty queue and the
         # call is only marked failed after the full call timeout.
         self.receive_error: BaseException | None = None
         self.receive_failed = asyncio.Event()
+        self._live_config: dict[str, Any] | None = None
+        self._live_model = ""
+        self._resumption_handle: str | None = None
         self.turn_complete = asyncio.Event()
         self.turn_complete_generation = -1
         self.turn_complete_queue: asyncio.Queue[int] = asyncio.Queue()
@@ -146,9 +146,7 @@ class GeminiLiveSession:
             generation = self.response_open_generation
             if generation is None:
                 return
-            event = self._turn_complete_events.setdefault(
-                generation, asyncio.Event()
-            )
+            event = self._turn_complete_events.setdefault(generation, asyncio.Event())
             remaining = deadline - loop.time()
             if remaining <= 0:
                 raise TimeoutError(
@@ -179,18 +177,19 @@ class GeminiLiveSession:
             "max_output_tokens": 1024,
             "system_instruction": instruction,
             "speech_config": {
-                "voice_config": {
-                    "prebuilt_voice_config": {"voice_name": voice}
-                }
+                "voice_config": {"prebuilt_voice_config": {"voice_name": voice}}
             },
             "realtime_input_config": {
-                "automatic_activity_detection": {"disabled": True}
+                "automatic_activity_detection": {"disabled": True},
+                "activity_handling": "START_OF_ACTIVITY_INTERRUPTS",
             },
             "input_audio_transcription": {},
             "output_audio_transcription": {},
             # 3.1 Flash Live defaults to minimal, but stating it explicitly
             # makes the latency policy visible and reproducible.
             "thinking_config": {"thinking_level": "minimal"},
+            "context_window_compression": {"sliding_window": {}},
+            "session_resumption": {},
         }
         if tool_declarations:
             config["tools"] = [{"function_declarations": tool_declarations}]
@@ -219,6 +218,9 @@ class GeminiLiveSession:
             self._connection_cm = None
             self.client = None
             raise
+
+        self._live_model = model
+        self._live_config = config
 
         self.timeline.add(
             "GEMINI_SETUP_COMPLETE",
@@ -263,9 +265,7 @@ class GeminiLiveSession:
         self.clear_output_nowait(generation=previous_generation)
         generation = self._generation
         async with self._send_lock:
-            await self.session.send_realtime_input(
-                activity_start=types.ActivityStart()
-            )
+            await self.session.send_realtime_input(activity_start=types.ActivityStart())
             self.timeline.add(
                 "GEMINI_ACTIVITY_START_SENT",
                 input_turn=self._input_turn,
@@ -306,9 +306,7 @@ class GeminiLiveSession:
         # the first response packet immediately after ActivityEnd returns.
         self._awaiting_response_generation = generation
         async with self._send_lock:
-            await self.session.send_realtime_input(
-                activity_end=types.ActivityEnd()
-            )
+            await self.session.send_realtime_input(activity_end=types.ActivityEnd())
             self.timeline.add(
                 "GEMINI_ACTIVITY_END_SENT",
                 input_turn=self._input_turn,
@@ -336,30 +334,39 @@ class GeminiLiveSession:
         try:
             while not self._closed and self.session is not None:
                 received_any = False
+                resume_requested = False
                 async for response in self.session.receive():
                     received_any = True
+                    update = getattr(response, "session_resumption_update", None)
+                    if update is not None:
+                        resumable = bool(getattr(update, "resumable", False))
+                        handle = str(getattr(update, "new_handle", "") or "")
+                        if resumable and handle:
+                            self._resumption_handle = handle
+                            self.timeline.add("GEMINI_RESUMPTION_TOKEN")
+                        continue
                     go_away = getattr(response, "go_away", None)
                     if go_away is not None:
                         time_left = getattr(go_away, "time_left", None)
-                        self.receive_error = RuntimeError(
-                            "Gemini Live session is ending"
-                            + (
-                                f" (time_left={time_left})"
-                                if time_left is not None
-                                else ""
-                            )
-                        )
-                        self.receive_failed.set()
                         self.timeline.add(
                             "GEMINI_GO_AWAY",
-                            time_left=str(time_left)
-                            if time_left is not None
-                            else None,
+                            time_left=str(time_left) if time_left is not None else None,
                         )
+                        if self._resumption_handle:
+                            resume_requested = True
+                            break
+                        self.receive_error = RuntimeError(
+                            "Gemini Live session is ending without a "
+                            "resumption handle"
+                        )
+                        self.receive_failed.set()
                         return
                     await self._handle_response(response)
                     if self._closed:
                         return
+                if resume_requested:
+                    await self._resume_connection()
+                    continue
                 # Some SDK versions end one iterator at turnComplete; create
                 # another iterator for the next turn. Avoid a tight loop if an
                 # implementation returns immediately without data.
@@ -376,6 +383,32 @@ class GeminiLiveSession:
                     error=f"{type(exc).__name__}: {exc}",
                 )
                 logger.exception("Gemini receive loop failed")
+
+    async def _resume_connection(self) -> None:
+        handle = self._resumption_handle
+        config = self._live_config
+        if not handle or config is None or self.client is None:
+            raise RuntimeError("Gemini session cannot be resumed")
+        resumed_config = {
+            **config,
+            "session_resumption": {"handle": handle},
+        }
+        async with self._send_lock:
+            old_connection = self._connection_cm
+            if old_connection is not None:
+                await old_connection.__aexit__(None, None, None)
+            connection = self.client.aio.live.connect(
+                model=self._live_model,
+                config=resumed_config,
+            )
+            session = await asyncio.wait_for(
+                connection.__aenter__(),
+                timeout=self.connect_timeout_seconds,
+            )
+            self._connection_cm = connection
+            self.session = session
+            self._live_config = resumed_config
+        self.timeline.add("GEMINI_SESSION_RESUMED")
 
     async def _handle_response(self, response: Any) -> None:
         tool_call = getattr(response, "tool_call", None)
@@ -396,9 +429,7 @@ class GeminiLiveSession:
         interrupted = bool(getattr(content, "interrupted", False))
         turn_complete = bool(getattr(content, "turn_complete", False))
         pending_generation = self._pending_server_generation
-        pending_audio_generation = getattr(
-            self, "_pending_audio_generation", None
-        )
+        pending_audio_generation = getattr(self, "_pending_audio_generation", None)
         is_pending_previous = pending_generation is not None and (
             interrupted
             or (
@@ -414,9 +445,7 @@ class GeminiLiveSession:
                 )
             )
         )
-        generation = (
-            pending_generation if is_pending_previous else self._generation
-        )
+        generation = pending_generation if is_pending_previous else self._generation
         input_transcript = self._input_transcripts.setdefault(generation, "")
         output_transcript = self._output_transcripts.setdefault(generation, "")
 
@@ -441,9 +470,6 @@ class GeminiLiveSession:
                 self._output_transcripts[generation] = output_transcript
                 if generation == self._generation:
                     self.output_transcript = output_transcript
-                boundary = self._boundary_kind(text)
-                if boundary is not None:
-                    await self.output_boundary_queue.put((generation, boundary))
                 logger.debug("Gemini output transcription: %s", text)
 
         if not is_pending_previous and (
@@ -468,9 +494,7 @@ class GeminiLiveSession:
                         continue
                     self._response_open_generation = generation
                     now = time.monotonic()
-                    previous_packet_at = self._last_audio_packet_at.get(
-                        generation
-                    )
+                    previous_packet_at = self._last_audio_packet_at.get(generation)
                     if previous_packet_at is not None:
                         gap_ms = (now - previous_packet_at) * 1000.0
                         if gap_ms >= 200.0:
@@ -483,15 +507,11 @@ class GeminiLiveSession:
                     self._last_audio_packet_at[generation] = now
                     if generation not in self._first_audio_seen_for_generation:
                         self._first_audio_seen_for_generation.add(generation)
-                        first_audio_events = getattr(
-                            self, "_first_audio_events", None
-                        )
+                        first_audio_events = getattr(self, "_first_audio_events", None)
                         if first_audio_events is None:
                             first_audio_events = {}
                             self._first_audio_events = first_audio_events
-                        first_audio_events.setdefault(
-                            generation, asyncio.Event()
-                        ).set()
+                        first_audio_events.setdefault(generation, asyncio.Event()).set()
                         self.timeline.add(
                             "GEMINI_FIRST_AUDIO",
                             generation=generation,
@@ -522,15 +542,11 @@ class GeminiLiveSession:
                 self._response_open_generation = None
             if getattr(self, "_awaiting_response_generation", None) == generation:
                 self._awaiting_response_generation = None
-            turn_complete_events = getattr(
-                self, "_turn_complete_events", None
-            )
+            turn_complete_events = getattr(self, "_turn_complete_events", None)
             if turn_complete_events is None:
                 turn_complete_events = {}
                 self._turn_complete_events = turn_complete_events
-            turn_complete_events.setdefault(
-                generation, asyncio.Event()
-            ).set()
+            turn_complete_events.setdefault(generation, asyncio.Event()).set()
             self.turn_complete_generation = generation
             self.turn_complete.set()
             await self.turn_complete_queue.put(generation)
@@ -540,7 +556,6 @@ class GeminiLiveSession:
                 input_transcript=input_transcript.strip(),
                 output_transcript=output_transcript.strip(),
             )
-
 
     async def wait_for_first_audio(self, generation: int, timeout: float) -> bool:
         event = self._first_audio_events.setdefault(generation, asyncio.Event())
@@ -552,19 +567,6 @@ class GeminiLiveSession:
 
     def transcript_for_generation(self, generation: int) -> str:
         return str(self._output_transcripts.get(generation, "") or "").strip()
-
-    @staticmethod
-    def _boundary_kind(text: str) -> str | None:
-        stripped = str(text or "").rstrip()
-        if not stripped:
-            return None
-        if stripped.endswith(("?", "？")):
-            return "question"
-        if stripped.endswith((".", "!", "…", "。", "！")):
-            return "medium"
-        if stripped.endswith((",", ";", ":", "—")):
-            return "short"
-        return None
 
     async def _handle_tool_call(self, tool_call: Any) -> None:
         """Acknowledge Gemini Live function calls and retain the latest outcome."""
@@ -621,9 +623,7 @@ class GeminiLiveSession:
             responses.append(types.FunctionResponse(**response_kwargs))
         if responses:
             async with self._send_lock:
-                await self.session.send_tool_response(
-                    function_responses=responses
-                )
+                await self.session.send_tool_response(function_responses=responses)
 
     async def close(self) -> None:
         if self._closed:
@@ -650,4 +650,4 @@ class GeminiLiveSession:
             raise RuntimeError(
                 "Gemini Live receiver failed: "
                 f"{type(self.receive_error).__name__}: {self.receive_error}"
-        ) from self.receive_error
+            ) from self.receive_error

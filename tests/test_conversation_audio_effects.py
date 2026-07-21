@@ -5,6 +5,8 @@ from elvin.media.conversation_audio import (
     ConversationAudioEffects,
     build_release_tail,
     duration_ms,
+    silence,
+    wsola_tempo,
 )
 from elvin.services.conversation_effects import default_effects_config
 
@@ -69,6 +71,46 @@ def test_pace_pause_and_mastering_are_configurable() -> None:
     assert 0 < len(processed) < len(source)
     effects.schedule_pause("short")
     assert round(duration_ms(effects.take_pause())) == 55
+
+
+def test_wsola_never_pads_live_blocks_with_audible_zero_holes() -> None:
+    source = _tone(100, frequency=440)
+    for pace in (94, 108):
+        processed = wsola_tempo(
+            source,
+            pace,
+            window_ms=33,
+            overlap_ms=12,
+            search_ms=8,
+        )
+        values = array("h")
+        values.frombytes(processed)
+        longest_zero_run = 0
+        current_zero_run = 0
+        for value in values:
+            if value == 0:
+                current_zero_run += 1
+                longest_zero_run = max(longest_zero_run, current_zero_run)
+            else:
+                current_zero_run = 0
+        assert longest_zero_run <= 2
+
+
+def test_micro_pauses_extend_confirmed_acoustic_gaps() -> None:
+    config = default_effects_config(enabled=False)
+    config["micro_pauses"]["enabled"] = True
+    config["micro_pauses"]["min_audio_before_pause_ms"] = 500
+    config["micro_pauses"]["natural_gap_min_ms"] = 35
+    config["micro_pauses"]["medium_pause_ms"] = 115
+    effects = ConversationAudioEffects(config)
+    effects.start_generation(1)
+    effects.set_micro_pause_profile("MEDIUM", 0.95)
+    source = _tone(600) + silence(60) + _tone(120)
+
+    processed = effects.process_actor_audio(source)
+
+    assert round(duration_ms(processed) - duration_ms(source)) == 115
+    assert effects.take_inserted_pause_ms() == 115
 
 
 def test_response_delay_uses_configured_bounds_without_jitter() -> None:

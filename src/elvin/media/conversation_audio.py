@@ -86,12 +86,14 @@ def apply_gain_percent(pcm: bytes, percent: float) -> bytes:
     return _pcm(values)
 
 
-def linear_fade(pcm: bytes, *, start_percent: float = 0.0, end_gain: float = 0.0) -> bytes:
+def linear_fade(
+    pcm: bytes, *, start_percent: float = 0.0, end_gain: float = 0.0
+) -> bytes:
     values = _samples(pcm)
     if not values:
         return pcm
     start = max(0, min(len(values) - 1, int(len(values) * start_percent / 100.0)))
-    span = max(1, len(values) - start)
+    span = max(1, len(values) - start - 1)
     for index in range(start, len(values)):
         progress = (index - start) / span
         gain = 1.0 + (float(end_gain) - 1.0) * progress
@@ -122,7 +124,9 @@ def find_natural_cut(
         max(0, int(sample_rate * max(0, max_trim_ms) / 1000)),
     )
     lower = max(1, len(values) - search_samples)
-    preferred_lower = max(lower, len(values) - max_trim_samples) if max_trim_samples else lower
+    preferred_lower = (
+        max(lower, len(values) - max_trim_samples) if max_trim_samples else lower
+    )
     best_index = len(values)
     best_score = float("inf")
     for index in range(len(values) - 1, preferred_lower - 1, -1):
@@ -147,7 +151,9 @@ def find_natural_cut(
     return _pcm(values[:best_index])
 
 
-def _correlation(left: list[float], right: array, right_offset: int, length: int) -> float:
+def _correlation(
+    left: list[float], right: array, right_offset: int, length: int
+) -> float:
     dot = 0.0
     left_energy = 1.0
     right_energy = 1.0
@@ -191,7 +197,8 @@ def wsola_tempo(
         # keep it unchanged instead of introducing a click.
         return pcm
 
-    estimated = int(len(source) / tempo) + window * 2
+    target_samples = max(1, int(round(len(source) / tempo)))
+    estimated = max(target_samples + window, int(len(source) / tempo) + window * 2)
     output = [0.0] * estimated
     weight = [0.0] * estimated
 
@@ -216,17 +223,22 @@ def wsola_tempo(
     source_pos += analysis_hop
     output_pos += synthesis_hop
 
-    while source_pos + window < len(source) and output_pos + window < len(output):
+    while output_pos < target_samples and source_pos < len(source):
         overlap_reference: list[float] = []
         for index in range(overlap):
             dst = output_pos + index
-            overlap_reference.append(
-                output[dst] / weight[dst] if weight[dst] else 0.0
-            )
-        best = source_pos
+            overlap_reference.append(output[dst] / weight[dst] if weight[dst] else 0.0)
+        # The old implementation stopped as soon as less than one complete
+        # source window remained, then padded the requested duration with
+        # zeros.  With 100 ms live blocks that produced a 6–21 ms dropout at
+        # every block boundary.  Reuse the final complete analysis window for
+        # the bounded tail instead; overlap-add keeps it continuous.
+        max_source_start = max(0, len(source) - window)
+        expected = min(source_pos, max_source_start)
+        best = expected
         best_score = -2.0
-        start = max(0, source_pos - search)
-        end = min(len(source) - window, source_pos + search)
+        start = max(0, expected - search)
+        end = min(max_source_start, expected + search)
         for candidate in range(start, end + 1, 2):
             score = _correlation(overlap_reference, source, candidate, overlap)
             if score > best_score:
@@ -246,13 +258,17 @@ def wsola_tempo(
             result.append(0)
         else:
             break
-    target_samples = max(1, int(round(len(source) / tempo)))
     if len(result) < target_samples:
-        result.extend([0] * (target_samples - len(result)))
+        # This is only reachable for unusually tiny/bounded inputs.  Extend
+        # the last real sample instead of creating an audible zero hole.
+        fill = result[-1] if result else 0
+        result.extend([fill] * (target_samples - len(result)))
     return _pcm(result[:target_samples])
 
 
-def _repeat_tail_with_crossfade(pcm: bytes, target_samples: int, sample_rate: int) -> bytes:
+def _repeat_tail_with_crossfade(
+    pcm: bytes, target_samples: int, sample_rate: int
+) -> bytes:
     values = list(_samples(pcm))
     if not values or len(values) >= target_samples:
         return _pcm(values[:target_samples])
@@ -359,8 +375,12 @@ class VoiceMasteringProcessor:
         attack_coeff = math.exp(-1.0 / (attack * self.sample_rate))
         release_coeff = math.exp(-1.0 / (release * self.sample_rate))
         makeup = 10.0 ** (float(self.config.get("makeup_gain_db", 1.5)) / 20.0)
-        limiter = 32767.0 * (10.0 ** (float(self.config.get("limiter_db", -1.5)) / 20.0))
-        deesser = max(0.0, min(1.0, float(self.config.get("deesser_percent", 18)) / 100.0))
+        limiter = 32767.0 * (
+            10.0 ** (float(self.config.get("limiter_db", -1.5)) / 20.0)
+        )
+        deesser = max(
+            0.0, min(1.0, float(self.config.get("deesser_percent", 18)) / 100.0)
+        )
         wet = max(0.0, min(1.0, float(self.config.get("wet_percent", 65)) / 100.0))
 
         result = array("h")
@@ -376,7 +396,9 @@ class VoiceMasteringProcessor:
                 highpassed = sample
             magnitude = abs(highpassed)
             coefficient = attack_coeff if magnitude > self.envelope else release_coeff
-            self.envelope = coefficient * self.envelope + (1.0 - coefficient) * magnitude
+            self.envelope = (
+                coefficient * self.envelope + (1.0 - coefficient) * magnitude
+            )
             gain = 1.0
             if self.envelope > threshold > 0:
                 compressed = threshold + (self.envelope - threshold) / ratio
@@ -410,6 +432,13 @@ class ConversationAudioEffects:
         self.processed_audio_ms = 0.0
         self.generation = -1
         self._pace_buffer = bytearray()
+        self._pace_last_sample: int | None = None
+        self._micro_frame_buffer = bytearray()
+        self._micro_quiet_ms = 0.0
+        self._micro_voiced_ms = 0.0
+        self._micro_pause_style = "NONE"
+        self._micro_pause_confidence = 0.0
+        self._inserted_pause_ms = 0
         self._rng = random.Random()
 
     def start_generation(self, generation: int) -> None:
@@ -420,6 +449,13 @@ class ConversationAudioEffects:
         self.added_pause_ms = 0
         self.processed_audio_ms = 0.0
         self._pace_buffer.clear()
+        self._pace_last_sample = None
+        self._micro_frame_buffer.clear()
+        self._micro_quiet_ms = 0.0
+        self._micro_voiced_ms = 0.0
+        self._micro_pause_style = "NONE"
+        self._micro_pause_confidence = 0.0
+        self._inserted_pause_ms = 0
 
     def set_pace(self, requested_percent: float) -> None:
         pace = self.config.get("pace_matching", {})
@@ -433,6 +469,15 @@ class ConversationAudioEffects:
         self.current_pace_percent = (
             self.current_pace_percent * smoothing + requested * (1.0 - smoothing)
         )
+
+    def set_micro_pause_profile(self, style: str, confidence: float) -> None:
+        self._micro_pause_style = str(style or "NONE").upper()
+        self._micro_pause_confidence = max(0.0, min(1.0, float(confidence)))
+
+    def take_inserted_pause_ms(self) -> int:
+        inserted = self._inserted_pause_ms
+        self._inserted_pause_ms = 0
+        return inserted
 
     def schedule_pause(self, kind: str) -> None:
         config = self.config.get("micro_pauses", {})
@@ -460,17 +505,109 @@ class ConversationAudioEffects:
         self.added_pause_ms += milliseconds
         return silence(milliseconds)
 
+    def _acoustic_micro_pauses(self, pcm: bytes, *, final: bool = False) -> bytes:
+        config = self.config.get("micro_pauses", {})
+        if not config.get("enabled"):
+            return pcm
+        if pcm:
+            self._micro_frame_buffer.extend(pcm)
+        # Five milliseconds is short enough to locate a real gap precisely,
+        # but long enough for a stable RMS estimate on telephone PCM.
+        frame_bytes = int(SAMPLE_RATE * 0.005) * SAMPLE_WIDTH
+        available = len(self._micro_frame_buffer)
+        complete = available - (available % frame_bytes)
+        if final:
+            complete = available
+        if complete <= 0:
+            return b""
+        source = bytes(self._micro_frame_buffer[:complete])
+        del self._micro_frame_buffer[:complete]
+        threshold_db = float(config.get("silence_threshold_db", -48))
+        threshold = 10.0 ** (threshold_db / 20.0)
+        minimum_gap = float(config.get("natural_gap_min_ms", 35))
+        minimum_voice = float(config.get("min_audio_before_pause_ms", 500))
+        confidence_threshold = float(config.get("boundary_confidence", 0.72))
+        result = bytearray()
+        for offset in range(0, len(source), frame_bytes):
+            frame = source[offset : offset + frame_bytes]
+            values = _samples(frame)
+            if not values:
+                continue
+            rms = (
+                math.sqrt(
+                    sum(float(value) * float(value) for value in values) / len(values)
+                )
+                / 32768.0
+            )
+            frame_ms = duration_ms(frame)
+            if rms <= threshold:
+                self._micro_quiet_ms += frame_ms
+                result.extend(frame)
+                continue
+            if (
+                self._micro_quiet_ms >= minimum_gap
+                and self._micro_voiced_ms >= minimum_voice
+                and self._micro_pause_style in {"LIGHT", "MEDIUM"}
+                and self._micro_pause_confidence >= confidence_threshold
+            ):
+                if (
+                    self._micro_pause_style == "MEDIUM"
+                    and self._micro_quiet_ms >= max(80.0, minimum_gap * 2.0)
+                ):
+                    requested = int(config.get("question_pause_ms", 90))
+                elif self._micro_pause_style == "MEDIUM":
+                    requested = int(config.get("medium_pause_ms", 115))
+                else:
+                    requested = int(config.get("short_pause_ms", 55))
+                maximum = int(config.get("max_added_ms_per_turn", 420))
+                requested = max(
+                    0,
+                    min(requested, maximum - self.added_pause_ms),
+                )
+                if requested:
+                    result.extend(silence(requested))
+                    self.added_pause_ms += requested
+                    self._inserted_pause_ms += requested
+            self._micro_quiet_ms = 0.0
+            self._micro_voiced_ms += frame_ms
+            result.extend(frame)
+        return bytes(result)
+
     def _finish_actor_audio(
-        self, pcm: bytes, *, duck_db: float = 0.0
+        self,
+        pcm: bytes,
+        *,
+        duck_db: float = 0.0,
+        final: bool = False,
     ) -> bytes:
         if not pcm:
-            return b""
+            result = self._acoustic_micro_pauses(b"", final=final)
+            self.history.append(result)
+            return result
         result = self.mastering.process(pcm)
         if duck_db < -0.01:
             result = apply_gain_db(result, duck_db)
-        self.history.append(result)
         self.processed_audio_ms += duration_ms(result)
+        result = self._acoustic_micro_pauses(result, final=final)
+        self.history.append(result)
         return result
+
+    def _smooth_pace_boundary(self, pcm: bytes) -> bytes:
+        if not pcm:
+            return pcm
+        values = _samples(pcm)
+        if not values:
+            return pcm
+        previous = self._pace_last_sample
+        if previous is not None:
+            transition = min(len(values), int(SAMPLE_RATE * 0.002))
+            for index in range(transition):
+                progress = (index + 1) / transition
+                values[index] = _clip(
+                    previous * (1.0 - progress) + values[index] * progress
+                )
+        self._pace_last_sample = int(values[-1])
+        return _pcm(values)
 
     def _pace_chunk(self, pcm: bytes) -> bytes:
         pace = self.config.get("pace_matching", {})
@@ -484,12 +621,14 @@ class ConversationAudioEffects:
         # window stays smaller so a single configured block contains several
         # candidate periods and can actually be stretched.
         window_ms = max(overlap_ms * 2, min(block_ms // 3, 40))
-        return wsola_tempo(
-            pcm,
-            self.current_pace_percent,
-            window_ms=window_ms,
-            overlap_ms=overlap_ms,
-            search_ms=int(pace.get("search_ms", 8)),
+        return self._smooth_pace_boundary(
+            wsola_tempo(
+                pcm,
+                self.current_pace_percent,
+                window_ms=window_ms,
+                overlap_ms=overlap_ms,
+                search_ms=int(pace.get("search_ms", 8)),
+            )
         )
 
     def process_actor_audio(self, pcm: bytes, *, duck_db: float = 0.0) -> bytes:
@@ -498,43 +637,42 @@ class ConversationAudioEffects:
         pace = self.config.get("pace_matching", {})
         if pace.get("enabled") and abs(self.current_pace_percent - 100.0) >= 0.5:
             self._pace_buffer.extend(pcm)
-            block_bytes = max(2, int(SAMPLE_RATE * int(pace.get("block_ms", 100)) / 1000) * 2)
+            block_bytes = max(
+                2, int(SAMPLE_RATE * int(pace.get("block_ms", 100)) / 1000) * 2
+            )
             block_bytes -= block_bytes % 2
             complete = len(self._pace_buffer) - (len(self._pace_buffer) % block_bytes)
             if complete <= 0:
                 return b""
             source = bytes(self._pace_buffer[:complete])
             del self._pace_buffer[:complete]
-            chunks = [
-                self._pace_chunk(source[offset : offset + block_bytes])
-                for offset in range(0, len(source), block_bytes)
-            ]
-            return self._finish_actor_audio(
-                b"".join(chunks), duck_db=duck_db
-            )
+            return self._finish_actor_audio(self._pace_chunk(source), duck_db=duck_db)
         if self._pace_buffer:
             pcm = bytes(self._pace_buffer) + pcm
             self._pace_buffer.clear()
         return self._finish_actor_audio(pcm, duck_db=duck_db)
 
     def flush_actor_audio(self, *, duck_db: float = 0.0) -> bytes:
-        if not self._pace_buffer:
-            return b""
         source = bytes(self._pace_buffer)
         self._pace_buffer.clear()
         return self._finish_actor_audio(
-            self._pace_chunk(source), duck_db=duck_db
+            self._pace_chunk(source) if source else b"",
+            duck_db=duck_db,
+            final=True,
         )
 
     def discard_pending_audio(self) -> None:
         self._pace_buffer.clear()
+        self._pace_last_sample = None
+        self._micro_frame_buffer.clear()
+        self._micro_quiet_ms = 0.0
         self.pending_pause_ms = 0
 
     def release_tail(self) -> bytes:
         config = self.config.get("natural_interruption", {})
-        if not config.get("enabled"):
-            return b""
         natural_cut = self.config.get("natural_cut", {})
+        if not config.get("enabled") and not natural_cut.get("enabled"):
+            return b""
         return build_release_tail(
             self.history.tail(int(config.get("history_ms", 80))),
             release_ms=int(config.get("release_ms", 280)),

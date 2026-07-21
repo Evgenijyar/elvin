@@ -52,7 +52,7 @@ def test_director_is_not_created_when_all_effects_are_disabled(
     assert call.director is None
 
 
-def test_enabled_effect_requires_and_uses_director_key(
+def test_local_effect_does_not_require_director_key(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setattr(runtime, "LocalTurnDetector", _Detector)
@@ -60,6 +60,27 @@ def test_enabled_effect_requires_and_uses_director_key(
     monkeypatch.setattr(runtime, "GeminiDirectorSession", _Director)
     effects = default_effects_config(enabled=False)
     effects["natural_interruption"]["enabled"] = True
+    robot = {"effects_config": effects}
+    call = PreparedVoiceCall(
+        identity=_identity(),
+        robot=robot,
+        actor_api_key="actor",
+        director_api_key="",
+        recordings_dir=tmp_path,
+        trace_enabled=False,
+        turn_config=runtime.TurnDetectorConfig(),
+    )
+    assert call.director is None
+
+
+def test_semantic_effect_requires_and_uses_director_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(runtime, "LocalTurnDetector", _Detector)
+    monkeypatch.setattr(runtime, "GeminiLiveSession", _Actor)
+    monkeypatch.setattr(runtime, "GeminiDirectorSession", _Director)
+    effects = default_effects_config(enabled=False)
+    effects["semantic_interruption"]["enabled"] = True
     robot = {"effects_config": effects}
     with pytest.raises(RuntimeError, match="Режиссёр"):
         PreparedVoiceCall(

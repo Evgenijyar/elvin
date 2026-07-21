@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
@@ -103,7 +104,13 @@ def _director_tools(config: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
                         },
                         "user_state": {
                             "type": "STRING",
-                            "enum": ["NEUTRAL", "ENGAGED", "THINKING", "IRRITATED", "UPSET"],
+                            "enum": [
+                                "NEUTRAL",
+                                "ENGAGED",
+                                "THINKING",
+                                "IRRITATED",
+                                "UPSET",
+                            ],
                         },
                         "confidence": {"type": "NUMBER"},
                     },
@@ -145,8 +152,7 @@ def _director_tools(config: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
                 "name": "request_latency_filler",
                 "description": (
                     "По запросу backend выбрать один короткий нейтральный филлер. "
-                    "Допустимы только: "
-                    + ", ".join(phrases)
+                    "Допустимы только: " + ", ".join(phrases)
                 ),
                 "parameters": {
                     "type": "OBJECT",
@@ -220,9 +226,15 @@ class GeminiDirectorSession:
         self._audio_grant: dict[str, Any] | None = None
         self._audio_grant_bytes = 0
         self._audio_utterance_sequence = 0
-        self.output_audio: asyncio.Queue[DirectorAudioPacket] = asyncio.Queue(maxsize=100)
+        self._pending_actor_transcripts: deque[str] = deque(maxlen=6)
+        self.output_audio: asyncio.Queue[DirectorAudioPacket] = asyncio.Queue(
+            maxsize=100
+        )
         self.receive_error: BaseException | None = None
         self.receive_failed = asyncio.Event()
+        self._live_config: dict[str, Any] | None = None
+        self._live_model = ""
+        self._resumption_handle: str | None = None
 
     @property
     def generation(self) -> int:
@@ -238,7 +250,10 @@ class GeminiDirectorSession:
         from google import genai
 
         voice = str(self.robot.get("voice_name") or "Kore")
-        temperature = float(self.robot.get("temperature") or 0.3)
+        # Director is a deterministic classifier/planner, not a creative
+        # conversational persona. Keep its sampling independent from the
+        # Actor temperature configured by the operator.
+        temperature = 0.1
         tools = _director_tools(self.effects_config)
         config: dict[str, Any] = {
             "response_modalities": ["AUDIO"],
@@ -248,16 +263,15 @@ class GeminiDirectorSession:
                 self.robot, self.effects_config
             ),
             "speech_config": {
-                "voice_config": {
-                    "prebuilt_voice_config": {"voice_name": voice}
-                }
+                "voice_config": {"prebuilt_voice_config": {"voice_name": voice}}
             },
             "realtime_input_config": {
-                "automatic_activity_detection": {"disabled": True}
+                "automatic_activity_detection": {"disabled": True},
+                "activity_handling": "START_OF_ACTIVITY_INTERRUPTS",
             },
-            "input_audio_transcription": {},
-            "output_audio_transcription": {},
-            "thinking_config": {"thinking_level": "low"},
+            "thinking_config": {"thinking_level": "minimal"},
+            "context_window_compression": {"sliding_window": {}},
+            "session_resumption": {},
         }
         if tools:
             config["tools"] = [{"function_declarations": tools}]
@@ -285,16 +299,43 @@ class GeminiDirectorSession:
             self._connection_cm = None
             self.client = None
             raise
+        self._live_model = GEMINI_LIVE_MODEL_ID
+        self._live_config = config
         self.timeline.add("DIRECTOR_SETUP_COMPLETE", model=GEMINI_LIVE_MODEL_ID)
         self._receiver_task = asyncio.create_task(
             self._receive_loop(),
             name=f"gemini-director-{self.timeline.call_id}",
         )
 
-    async def start_activity(self, *, actor_speaking: bool = False) -> int:
+    async def start_activity(self, *, actor_speaking: bool = False) -> int | None:
         self._ensure_connected()
         from google.genai import types
 
+        if self._activity_open:
+            self.timeline.add(
+                "DIRECTOR_ACTIVITY_SKIPPED",
+                generation=self._generation,
+                reason="activity_already_open",
+            )
+            return None
+        previous = self._generation
+        previous_complete = self._turn_complete_events.get(previous)
+        if (
+            previous > 0
+            and previous_complete is not None
+            and not previous_complete.is_set()
+        ):
+            # A Gemini 3.1 function call is synchronous. Starting another
+            # activity before turnComplete would interrupt the old tool turn
+            # and make its unlabelled server messages look like the new
+            # generation. Skipping advisory analysis is safer than corrupting
+            # Actor timing or playing stale auxiliary audio.
+            self.timeline.add(
+                "DIRECTOR_ACTIVITY_SKIPPED",
+                generation=previous,
+                reason="previous_turn_busy",
+            )
+            return None
         self._generation += 1
         generation = self._generation
         self._activity_open = True
@@ -304,9 +345,14 @@ class GeminiDirectorSession:
         self._audio_grant = None
         self._audio_grant_bytes = 0
         async with self._send_lock:
-            await self.session.send_realtime_input(
-                activity_start=types.ActivityStart()
-            )
+            await self.session.send_realtime_input(activity_start=types.ActivityStart())
+            while self._pending_actor_transcripts:
+                await self.session.send_realtime_input(
+                    text=(
+                        "[ТРАНСКРИПЦИЯ ПРЕДЫДУЩЕЙ РЕПЛИКИ АКТЁРА] "
+                        + self._pending_actor_transcripts.popleft()
+                    )
+                )
             if actor_speaking:
                 await self.session.send_realtime_input(
                     text=(
@@ -348,10 +394,11 @@ class GeminiDirectorSession:
         cleaned = str(text or "").strip()
         if not cleaned or self.session is None or self._closed:
             return
-        async with self._send_lock:
-            await self.session.send_realtime_input(
-                text="[ТРАНСКРИПЦИЯ АКТЁРА] " + cleaned[:4000]
-            )
+        # Realtime text sent outside an explicit manual-VAD activity is not a
+        # complete turn. Keep it locally and attach it to the next Director
+        # activity so it cannot surface many seconds later in an unrelated
+        # tool call.
+        self._pending_actor_transcripts.append(cleaned[:4000])
 
     async def mark_midturn_pause(self) -> None:
         if self.session is None or self._closed or not self._activity_open:
@@ -359,30 +406,53 @@ class GeminiDirectorSession:
         async with self._send_lock:
             await self.session.send_realtime_input(
                 text=(
-                    "[СЛУЖЕБНОЕ СОСТОЯНИЕ] Это микропауза внутри длинной "
-                    "реплики клиента, а не окончание мысли. Не вызывай "
-                    "report_turn_plan. Если естественна короткая реакция "
-                    "слушателя, можешь вызвать request_backchannel."
+                    "[СЛУЖЕБНОЕ СОСТОЯНИЕ] Обнаружена пауза-кандидат внутри "
+                    "длинной реплики клиента. Не вызывай report_turn_plan. "
+                    "Вызывай request_backchannel только если по смыслу фраза "
+                    "явно не закончена и короткая реакция действительно уместна. "
+                    "Backend воспроизведёт её лишь после подтверждения, что "
+                    "клиент продолжил говорить."
                 )
             )
 
-    async def request_latency_filler(self) -> None:
+    async def request_latency_filler(self) -> int | None:
         if not _effect_enabled(self.effects_config, "latency_fillers"):
-            return
+            return None
         self._ensure_connected()
         phrases = phrases_from_value(
             self.effects_config["latency_fillers"].get("phrases")
         )
-        async with self._send_lock:
-            await self.session.send_realtime_input(
-                text=(
-                    "[СЛУЖЕБНЫЙ ЗАПРОС] Актёр ещё не начал ответ. Если сейчас "
-                    "социально уместен короткий филлер, вызови request_latency_filler "
-                    "и выбери только из списка: "
-                    + ", ".join(phrases)
-                    + ". Иначе не вызывай ничего."
+        previous = self._generation
+        if previous > 0:
+            complete = await self.wait_for_turn_complete(previous, 500)
+            if not complete:
+                self.timeline.add(
+                    "DIRECTOR_FILLER_SKIPPED",
+                    generation=previous,
+                    reason="previous_turn_busy",
                 )
-            )
+                return None
+        generation = await self.start_activity(actor_speaking=False)
+        if generation is None:
+            return None
+        try:
+            async with self._send_lock:
+                await self.session.send_realtime_input(
+                    text=(
+                        "[СЛУЖЕБНЫЙ ЗАПРОС] Актёр ещё не начал ответ. Если сейчас "
+                        "социально уместен короткий филлер, вызови "
+                        "request_latency_filler и выбери только из списка: "
+                        + ", ".join(phrases)
+                        + ". Иначе не вызывай ничего."
+                    )
+                )
+        finally:
+            await self.end_activity()
+        self.timeline.add(
+            "DIRECTOR_FILLER_ACTIVITY",
+            generation=generation,
+        )
+        return generation
 
     async def wait_for_interruption(
         self, generation: int, timeout_ms: int
@@ -394,16 +464,10 @@ class GeminiDirectorSession:
             return None
         return self._interruption_decisions.get(generation)
 
-    async def wait_for_turn_complete(
-        self, generation: int, timeout_ms: int
-    ) -> bool:
-        event = self._turn_complete_events.setdefault(
-            generation, asyncio.Event()
-        )
+    async def wait_for_turn_complete(self, generation: int, timeout_ms: int) -> bool:
+        event = self._turn_complete_events.setdefault(generation, asyncio.Event())
         try:
-            await asyncio.wait_for(
-                event.wait(), timeout=max(0.01, timeout_ms / 1000)
-            )
+            await asyncio.wait_for(event.wait(), timeout=max(0.01, timeout_ms / 1000))
         except TimeoutError:
             return False
         return True
@@ -422,11 +486,41 @@ class GeminiDirectorSession:
         try:
             while not self._closed and self.session is not None:
                 received_any = False
+                resume_requested = False
                 async for response in self.session.receive():
                     received_any = True
+                    update = getattr(response, "session_resumption_update", None)
+                    if update is not None:
+                        resumable = bool(getattr(update, "resumable", False))
+                        handle = str(getattr(update, "new_handle", "") or "")
+                        if resumable and handle:
+                            self._resumption_handle = handle
+                            self.timeline.add("DIRECTOR_RESUMPTION_TOKEN")
+                        continue
+                    go_away = getattr(response, "go_away", None)
+                    if go_away is not None:
+                        time_left = getattr(go_away, "time_left", None)
+                        self.timeline.add(
+                            "DIRECTOR_GO_AWAY",
+                            time_left=(
+                                str(time_left) if time_left is not None else None
+                            ),
+                        )
+                        if self._resumption_handle:
+                            resume_requested = True
+                            break
+                        self.receive_error = RuntimeError(
+                            "Gemini Director session is ending without a "
+                            "resumption handle"
+                        )
+                        self.receive_failed.set()
+                        return
                     await self._handle_response(response)
                     if self._closed:
                         return
+                if resume_requested:
+                    await self._resume_connection()
+                    continue
                 if not received_any:
                     await asyncio.sleep(0.01)
         except asyncio.CancelledError:
@@ -440,6 +534,32 @@ class GeminiDirectorSession:
                     error=f"{type(exc).__name__}: {exc}",
                 )
                 logger.exception("Gemini Director receive loop failed")
+
+    async def _resume_connection(self) -> None:
+        handle = self._resumption_handle
+        config = self._live_config
+        if not handle or config is None or self.client is None:
+            raise RuntimeError("Gemini Director session cannot be resumed")
+        resumed_config = {
+            **config,
+            "session_resumption": {"handle": handle},
+        }
+        async with self._send_lock:
+            old_connection = self._connection_cm
+            if old_connection is not None:
+                await old_connection.__aexit__(None, None, None)
+            connection = self.client.aio.live.connect(
+                model=self._live_model,
+                config=resumed_config,
+            )
+            session = await asyncio.wait_for(
+                connection.__aenter__(),
+                timeout=self.connect_timeout_seconds,
+            )
+            self._connection_cm = connection
+            self.session = session
+            self._live_config = resumed_config
+        self.timeline.add("DIRECTOR_SESSION_RESUMED")
 
     async def _handle_response(self, response: Any) -> None:
         tool_call = getattr(response, "tool_call", None)
@@ -496,9 +616,7 @@ class GeminiDirectorSession:
                 )
             self._audio_grant = None
             self._audio_grant_bytes = 0
-            self._turn_complete_events.setdefault(
-                generation, asyncio.Event()
-            ).set()
+            self._turn_complete_events.setdefault(generation, asyncio.Event()).set()
 
     async def _handle_tool_call(self, tool_call: Any) -> None:
         self._ensure_connected()
@@ -524,7 +642,10 @@ class GeminiDirectorSession:
                 self._interruption_events.setdefault(
                     self._generation, asyncio.Event()
                 ).set()
-                payload = {"accepted": True}
+                payload = {
+                    "accepted": True,
+                    "instruction": "Заверши ответ без аудио.",
+                }
                 self.timeline.add(
                     "DIRECTOR_INTERRUPTION_DECISION",
                     generation=self._generation,
@@ -535,9 +656,15 @@ class GeminiDirectorSession:
             elif name == "report_turn_plan":
                 plan = DirectorTurnPlan(
                     generation=self._generation,
-                    response_delay_ms=max(0, min(2500, int(args.get("response_delay_ms") or 0))),
-                    pace_percent=max(70.0, min(140.0, float(args.get("pace_percent") or 100))),
-                    micro_pause_style=str(args.get("micro_pause_style") or "NONE").upper(),
+                    response_delay_ms=max(
+                        0, min(2500, int(args.get("response_delay_ms") or 0))
+                    ),
+                    pace_percent=max(
+                        70.0, min(140.0, float(args.get("pace_percent") or 100))
+                    ),
+                    micro_pause_style=str(
+                        args.get("micro_pause_style") or "NONE"
+                    ).upper(),
                     user_state=str(args.get("user_state") or "NEUTRAL").upper(),
                     confidence=max(0.0, min(1.0, float(args.get("confidence") or 0))),
                 )
@@ -545,7 +672,10 @@ class GeminiDirectorSession:
                 self._turn_plan_events.setdefault(
                     self._generation, asyncio.Event()
                 ).set()
-                payload = {"accepted": True}
+                payload = {
+                    "accepted": True,
+                    "instruction": "Заверши ответ без аудио.",
+                }
                 self.timeline.add(
                     "DIRECTOR_TURN_PLAN",
                     generation=self._generation,
@@ -558,13 +688,15 @@ class GeminiDirectorSession:
             elif name in {"request_backchannel", "request_latency_filler"}:
                 kind = "backchannel" if name == "request_backchannel" else "filler"
                 effect_key = (
-                    "listener_backchannels" if kind == "backchannel" else "latency_fillers"
+                    "listener_backchannels"
+                    if kind == "backchannel"
+                    else "latency_fillers"
                 )
                 effect = self.effects_config.get(effect_key, {})
                 allowed = phrases_from_value(effect.get("phrases"))
                 phrase = str(args.get("phrase") or "").strip()
                 confidence = max(0.0, min(1.0, float(args.get("confidence") or 0)))
-                threshold = float(effect.get("confidence", 0.0)) if kind == "backchannel" else 0.0
+                threshold = float(effect.get("confidence", 0.0))
                 accepted = bool(
                     effect.get("enabled")
                     and phrase in allowed

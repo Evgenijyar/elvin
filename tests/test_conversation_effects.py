@@ -1,6 +1,7 @@
 from elvin.services.conversation_effects import (
     any_effect_enabled,
     default_effects_config,
+    director_required,
     effect_catalog_api,
     normalize_effects_config,
     phrases_from_value,
@@ -13,6 +14,19 @@ def test_catalog_contains_ten_opt_in_effects() -> None:
     assert len(catalog["defaults"]) == 10
     assert all(not values["enabled"] for values in catalog["defaults"].values())
     assert not any_effect_enabled(catalog["defaults"])
+    assert not director_required(catalog["defaults"])
+
+
+def test_only_semantic_effects_require_director() -> None:
+    local = default_effects_config(enabled=False)
+    local["natural_interruption"]["enabled"] = True
+    local["natural_cut"]["enabled"] = True
+    local["voice_mastering"]["enabled"] = True
+    assert any_effect_enabled(local)
+    assert not director_required(local)
+
+    local["listener_backchannels"]["enabled"] = True
+    assert director_required(local)
 
 
 def test_effect_values_are_completed_and_bounded() -> None:
