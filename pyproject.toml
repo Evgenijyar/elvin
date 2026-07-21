@@ -1,6 +1,6 @@
 [project]
 name = "elvin"
-version = "1.2.3"
+version = "1.2.4"
 description = "Production-ready backend for AI outbound voice calls"
 readme = "README.md"
 authors = [

@@ -71,6 +71,8 @@ class AsteriskProtocol:
         self.json_mode = True
         self.info = AsteriskMediaInfo()
         self.send_lock = asyncio.Lock()
+        self.media_pacing_lock = asyncio.Lock()
+        self.next_media_at = 0.0
         self.media_allowed = asyncio.Event()
         self.media_allowed.set()
         self.media_started = asyncio.Event()
@@ -109,6 +111,17 @@ class AsteriskProtocol:
             message = command if not suffix else f"{command} {suffix}"
         async with self.send_lock:
             await self.websocket.send_text(message)
+        # Asterisk normally acknowledges queue flow-control changes with
+        # MEDIA_XOFF/MEDIA_XON.  FLUSH_MEDIA is also the barge-in recovery
+        # boundary, but chan_websocket does not always emit a separate XON
+        # after a flush that follows an earlier queue XOFF.  Keep the local
+        # gate in the same state as the command semantics so a later Actor
+        # packet cannot wait forever on a missing acknowledgement.
+        if command == "PAUSE_MEDIA":
+            self.media_allowed.clear()
+        elif command in {"CONTINUE_MEDIA", "FLUSH_MEDIA"}:
+            self.media_allowed.set()
+            self.next_media_at = 0.0
 
     async def send_media(
         self,
@@ -118,19 +131,41 @@ class AsteriskProtocol:
     ) -> bool:
         if not pcm:
             return False
-        # Asterisk's underlying websocket layer rejects messages > 65500.
-        for offset in range(0, len(pcm), 64_000):
-            chunk = pcm[offset : offset + 64_000]
-            await self.media_allowed.wait()
-            # A barge-in can happen while MEDIA_XOFF is active. Re-check the
-            # generation after the wait so stale audio is never released into
-            # the channel after FLUSH_MEDIA.
-            if generation is not None and generation != self.call.gemini.generation:
-                return False
-            async with self.send_lock:
+        # chan_websocket applies queue flow control when the application sends
+        # large bursts. Send exactly one telephony frame per ptime instead:
+        # this keeps the remote queue bounded and prevents MEDIA_XOFF from
+        # turning a normal Gemini packet burst into seconds of silence.
+        frame_size = max(2, int(self.info.optimal_frame_size or 640))
+        frame_size -= frame_size % 2
+        frame_size = max(2, frame_size)
+        frame_duration = max(0.005, float(self.info.ptime or 20) / 1000.0)
+        async with self.media_pacing_lock:
+            for offset in range(0, len(pcm), frame_size):
+                frame = pcm[offset : offset + frame_size]
+                if len(frame) % 2:
+                    frame += b"\x00"
+                await self.media_allowed.wait()
+                # A barge-in can happen while MEDIA_XOFF is active. Re-check
+                # after every wait so stale audio is never released after
+                # FLUSH_MEDIA.
                 if generation is not None and generation != self.call.gemini.generation:
                     return False
-                await self.websocket.send_bytes(chunk)
+                loop = asyncio.get_running_loop()
+                now = loop.time()
+                next_at = self.next_media_at
+                if next_at <= 0.0 or next_at < now - frame_duration * 2:
+                    next_at = now
+                delay = next_at - now
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                await self.media_allowed.wait()
+                if generation is not None and generation != self.call.gemini.generation:
+                    return False
+                async with self.send_lock:
+                    if generation is not None and generation != self.call.gemini.generation:
+                        return False
+                    await self.websocket.send_bytes(frame)
+                self.next_media_at = max(next_at, loop.time()) + frame_duration
         return True
 
     async def mark(self, correlation_id: str) -> asyncio.Event:

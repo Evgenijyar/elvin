@@ -147,6 +147,44 @@ def test_protocol_accepts_json_and_legacy_events() -> None:
     assert legacy["optimal_frame_size"] == "640"
 
 
+def test_flush_and_continue_reopen_local_media_gate_after_xoff() -> None:
+    websocket = _FakeWebSocket()
+    protocol = AsteriskProtocol(websocket, SimpleNamespace(timeline=_FakeTimeline()))
+
+    async def exercise() -> None:
+        protocol.handle_event({"event": "MEDIA_XOFF"})
+        assert not protocol.media_allowed.is_set()
+        await protocol.command("FLUSH_MEDIA")
+        assert protocol.media_allowed.is_set()
+        protocol.handle_event({"event": "MEDIA_XOFF"})
+        await protocol.command("CONTINUE_MEDIA")
+        assert protocol.media_allowed.is_set()
+
+    asyncio.run(exercise())
+
+
+def test_protocol_paces_outbound_pcm_as_telephony_frames() -> None:
+    class _RecordingWebSocket(_FakeWebSocket):
+        def __init__(self) -> None:
+            self.frames: list[bytes] = []
+
+        async def send_bytes(self, payload: bytes) -> None:
+            self.frames.append(payload)
+
+    websocket = _RecordingWebSocket()
+    protocol = AsteriskProtocol(
+        websocket,
+        SimpleNamespace(timeline=_FakeTimeline(), gemini=SimpleNamespace(generation=1)),
+    )
+    protocol.info = AsteriskMediaInfo(optimal_frame_size=640, ptime=20)
+
+    async def exercise() -> None:
+        assert await protocol.send_media(b"x" * 1_920, generation=1)
+
+    asyncio.run(exercise())
+    assert [len(frame) for frame in websocket.frames] == [640, 640, 640]
+
+
 def test_pending_turn_is_serialized_and_chunked() -> None:
     sent_to_gemini: list[bytes] = []
     activity_calls: list[str] = []
