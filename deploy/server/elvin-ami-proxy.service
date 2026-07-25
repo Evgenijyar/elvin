@@ -1,0 +1,11 @@
+[Unit]
+Description=Elvin Docker-to-local-Asterisk AMI proxy
+Requires=asterisk.service
+After=asterisk.service
+
+[Service]
+ExecStart=/lib/systemd/systemd-socket-proxyd 127.0.0.1:5038
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+NoNewPrivileges=true

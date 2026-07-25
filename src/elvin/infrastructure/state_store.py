@@ -34,6 +34,8 @@ ROBOT_DEFAULTS: dict[str, Any] = {
     "interjection_max_speech_ms": 650,
     "delayed_interruption": False,
     "interruption_tail_ms": 250,
+    "interruption_fade_enabled": False,
+    "interruption_fade_ms": 200,
 }
 
 ASSIGNMENT_DEFAULTS: dict[str, Any] = {
@@ -204,6 +206,8 @@ class StateStore:
                 "ALTER TABLE app.robot_profiles ADD COLUMN IF NOT EXISTS interjection_max_speech_ms INTEGER NOT NULL DEFAULT 650",
                 "ALTER TABLE app.robot_profiles ADD COLUMN IF NOT EXISTS delayed_interruption BOOLEAN NOT NULL DEFAULT FALSE",
                 "ALTER TABLE app.robot_profiles ADD COLUMN IF NOT EXISTS interruption_tail_ms INTEGER NOT NULL DEFAULT 250",
+                "ALTER TABLE app.robot_profiles ADD COLUMN IF NOT EXISTS interruption_fade_enabled BOOLEAN NOT NULL DEFAULT FALSE",
+                "ALTER TABLE app.robot_profiles ADD COLUMN IF NOT EXISTS interruption_fade_ms INTEGER NOT NULL DEFAULT 200",
                 "ALTER TABLE app.project_robot_assignments ADD COLUMN IF NOT EXISTS lead_stage_id BIGINT",
                 "ALTER TABLE app.project_robot_assignments ADD COLUMN IF NOT EXISTS lead_stage_name TEXT NOT NULL DEFAULT ''",
                 "ALTER TABLE app.project_robot_assignments ADD COLUMN IF NOT EXISTS special_stage_id BIGINT",
@@ -361,6 +365,7 @@ class StateStore:
                        stop_list_condition, answering_machine_condition,
                        ignore_short_interjections, interjection_max_speech_ms,
                        delayed_interruption, interruption_tail_ms,
+                       interruption_fade_enabled, interruption_fade_ms,
                        active, created_at, updated_at
                 FROM app.robot_profiles
                 ORDER BY updated_at DESC, name ASC
@@ -414,12 +419,12 @@ class StateStore:
             "interjection_max_speech_ms": int(
                 payload.get("interjection_max_speech_ms", 650)
             ),
-            "delayed_interruption": bool(
-                payload.get("delayed_interruption", False)
+            "delayed_interruption": bool(payload.get("delayed_interruption", False)),
+            "interruption_tail_ms": int(payload.get("interruption_tail_ms", 250)),
+            "interruption_fade_enabled": bool(
+                payload.get("interruption_fade_enabled", False)
             ),
-            "interruption_tail_ms": int(
-                payload.get("interruption_tail_ms", 250)
-            ),
+            "interruption_fade_ms": int(payload.get("interruption_fade_ms", 200)),
             "active": bool(payload.get("active", True)),
             "created_at": now,
             "updated_at": now,
@@ -434,10 +439,12 @@ class StateStore:
                     refusal_condition, callback_condition,
                     stop_list_condition, answering_machine_condition,
                     ignore_short_interjections, interjection_max_speech_ms,
-                    delayed_interruption, interruption_tail_ms, active
+                    delayed_interruption, interruption_tail_ms,
+                    interruption_fade_enabled, interruption_fade_ms, active
                 ) VALUES(
                     $1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                    $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
+                    $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
+                    $21, $22
                 )
                 RETURNING id, name, description, model_id, voice_name,
                           temperature, role_prompt, knowledge_base,
@@ -447,6 +454,7 @@ class StateStore:
                           ignore_short_interjections,
                           interjection_max_speech_ms, delayed_interruption,
                           interruption_tail_ms,
+                          interruption_fade_enabled, interruption_fade_ms,
                           active, created_at, updated_at
                 """,
                 robot_id,
@@ -468,6 +476,8 @@ class StateStore:
                 item["interjection_max_speech_ms"],
                 item["delayed_interruption"],
                 item["interruption_tail_ms"],
+                item["interruption_fade_enabled"],
+                item["interruption_fade_ms"],
                 item["active"],
             )
             return self._robot_row(row)
@@ -494,7 +504,9 @@ class StateStore:
                     ignore_short_interjections=$16,
                     interjection_max_speech_ms=$17,
                     delayed_interruption=$18, interruption_tail_ms=$19,
-                    active=$20, updated_at=NOW()
+                    interruption_fade_enabled=$20,
+                    interruption_fade_ms=$21,
+                    active=$22, updated_at=NOW()
                 WHERE id=$1::uuid
                 RETURNING id, name, description, model_id, voice_name,
                           temperature, role_prompt, knowledge_base,
@@ -504,6 +516,7 @@ class StateStore:
                           ignore_short_interjections,
                           interjection_max_speech_ms, delayed_interruption,
                           interruption_tail_ms,
+                          interruption_fade_enabled, interruption_fade_ms,
                           active, created_at, updated_at
                 """,
                 robot_id,
@@ -525,6 +538,8 @@ class StateStore:
                 int(payload.get("interjection_max_speech_ms", 650)),
                 bool(payload.get("delayed_interruption", False)),
                 int(payload.get("interruption_tail_ms", 250)),
+                bool(payload.get("interruption_fade_enabled", False)),
+                int(payload.get("interruption_fade_ms", 200)),
                 bool(payload.get("active", True)),
             )
             return self._robot_row(row) if row else None
@@ -568,6 +583,12 @@ class StateStore:
                     ),
                     "interruption_tail_ms": int(
                         payload.get("interruption_tail_ms", 250)
+                    ),
+                    "interruption_fade_enabled": bool(
+                        payload.get("interruption_fade_enabled", False)
+                    ),
+                    "interruption_fade_ms": int(
+                        payload.get("interruption_fade_ms", 200)
                     ),
                     "active": bool(payload.get("active", True)),
                     "updated_at": datetime.now(UTC).isoformat(),

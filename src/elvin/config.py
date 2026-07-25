@@ -46,6 +46,24 @@ class Settings(BaseSettings):
         default=None,
         validation_alias="GEMINI_API_KEY",
     )
+    asterisk_ami_username: str | None = Field(
+        default=None,
+        validation_alias="ASTERISK_AMI_USERNAME",
+    )
+    asterisk_ami_password: SecretStr | None = Field(
+        default=None,
+        validation_alias="ASTERISK_AMI_PASSWORD",
+    )
+    asterisk_ami_host: str = Field(
+        default="127.0.0.1",
+        validation_alias="ASTERISK_AMI_HOST",
+    )
+    asterisk_ami_port: int = Field(
+        default=5038,
+        ge=1,
+        le=65535,
+        validation_alias="ASTERISK_AMI_PORT",
+    )
 
     data_dir: Path = Field(
         default=Path("./data"),
@@ -129,16 +147,39 @@ class Settings(BaseSettings):
         le=3600.0,
         validation_alias="ELVIN_MEDIA_CONNECT_TIMEOUT_SECONDS",
     )
-    frame_trace_enabled: bool = Field(default=True, validation_alias="ELVIN_FRAME_TRACE_ENABLED")
-    vad_confidence: float = Field(default=0.45, ge=0.05, le=0.99, validation_alias="ELVIN_VAD_CONFIDENCE")
-    vad_start_seconds: float = Field(default=0.08, ge=0.02, le=1.0, validation_alias="ELVIN_VAD_START_SECONDS")
-    vad_stop_seconds: float = Field(default=0.20, ge=0.04, le=2.0, validation_alias="ELVIN_VAD_STOP_SECONDS")
-    vad_min_volume: float = Field(default=0.03, ge=0.0, le=1.0, validation_alias="ELVIN_VAD_MIN_VOLUME")
-    pre_roll_ms: int = Field(default=240, ge=80, le=1000, validation_alias="ELVIN_PRE_ROLL_MS")
-    smart_turn_retry_ms: int = Field(default=200, ge=100, le=2000, validation_alias="ELVIN_SMART_TURN_RETRY_MS")
-    turn_merge_grace_ms: int = Field(default=300, ge=100, le=1200, validation_alias="ELVIN_TURN_MERGE_GRACE_MS")
-    force_end_silence_ms: int = Field(default=900, ge=500, le=5000, validation_alias="ELVIN_FORCE_END_SILENCE_MS")
-    pcm_level_log_interval_seconds: float = Field(default=1.0, ge=0.2, le=10.0, validation_alias="ELVIN_PCM_LEVEL_LOG_INTERVAL_SECONDS")
+    frame_trace_enabled: bool = Field(
+        default=True, validation_alias="ELVIN_FRAME_TRACE_ENABLED"
+    )
+    vad_confidence: float = Field(
+        default=0.45, ge=0.05, le=0.99, validation_alias="ELVIN_VAD_CONFIDENCE"
+    )
+    vad_start_seconds: float = Field(
+        default=0.08, ge=0.02, le=1.0, validation_alias="ELVIN_VAD_START_SECONDS"
+    )
+    vad_stop_seconds: float = Field(
+        default=0.20, ge=0.04, le=2.0, validation_alias="ELVIN_VAD_STOP_SECONDS"
+    )
+    vad_min_volume: float = Field(
+        default=0.03, ge=0.0, le=1.0, validation_alias="ELVIN_VAD_MIN_VOLUME"
+    )
+    pre_roll_ms: int = Field(
+        default=240, ge=80, le=1000, validation_alias="ELVIN_PRE_ROLL_MS"
+    )
+    smart_turn_retry_ms: int = Field(
+        default=200, ge=100, le=2000, validation_alias="ELVIN_SMART_TURN_RETRY_MS"
+    )
+    turn_merge_grace_ms: int = Field(
+        default=300, ge=100, le=1200, validation_alias="ELVIN_TURN_MERGE_GRACE_MS"
+    )
+    force_end_silence_ms: int = Field(
+        default=900, ge=500, le=5000, validation_alias="ELVIN_FORCE_END_SILENCE_MS"
+    )
+    pcm_level_log_interval_seconds: float = Field(
+        default=1.0,
+        ge=0.2,
+        le=10.0,
+        validation_alias="ELVIN_PCM_LEVEL_LOG_INTERVAL_SECONDS",
+    )
 
     @property
     def is_production(self) -> bool:
@@ -147,9 +188,7 @@ class Settings(BaseSettings):
     @property
     def database_configured(self) -> bool:
         password = (
-            self.db_password.get_secret_value()
-            if self.db_password is not None
-            else ""
+            self.db_password.get_secret_value() if self.db_password is not None else ""
         )
         return bool(self.db_host and self.db_name and self.db_user and password)
 
@@ -165,9 +204,17 @@ class Settings(BaseSettings):
     @property
     def gemini_key_configured(self) -> bool:
         return bool(
-            self.gemini_api_key
-            and self.gemini_api_key.get_secret_value().strip()
+            self.gemini_api_key and self.gemini_api_key.get_secret_value().strip()
         )
+
+    @property
+    def asterisk_ami_configured(self) -> bool:
+        password = (
+            self.asterisk_ami_password.get_secret_value()
+            if self.asterisk_ami_password is not None
+            else ""
+        )
+        return bool(self.asterisk_ami_host and self.asterisk_ami_username and password)
 
 
 @lru_cache

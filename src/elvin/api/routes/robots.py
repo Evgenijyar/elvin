@@ -46,6 +46,8 @@ class RobotPayload(BaseModel):
     interjection_max_speech_ms: int = Field(default=650, ge=100, le=2000)
     delayed_interruption: bool = False
     interruption_tail_ms: int = Field(default=250, ge=0, le=2000)
+    interruption_fade_enabled: bool = False
+    interruption_fade_ms: int = Field(default=200, ge=0, le=2000)
     active: bool = True
 
 

@@ -117,9 +117,25 @@ def test_robot_policy_values_are_bounded() -> None:
             "interjection_max_speech_ms": 99_999,
             "delayed_interruption": True,
             "interruption_tail_ms": -5,
+            "interruption_fade_enabled": True,
+            "interruption_fade_ms": 99_999,
         }
     )
 
     assert policy.interjection_max_speech_ms == 2_000
     assert policy.interruption_tail_ms == 0
+    assert policy.interruption_fade_ms == 2_000
+    assert policy.effective_fade_ms == 0
     assert policy.enabled
+
+
+def test_voice_fade_is_clamped_to_the_interruption_tail() -> None:
+    policy = InterruptionPolicy(
+        delayed_interruption=True,
+        interruption_tail_ms=300,
+        interruption_fade_enabled=True,
+        interruption_fade_ms=500,
+    )
+
+    assert policy.effective_tail_ms == 300
+    assert policy.effective_fade_ms == 300

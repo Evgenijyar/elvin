@@ -37,6 +37,8 @@ def test_robot_interruption_settings_round_trip_in_local_storage(
         interjection_max_speech_ms=700,
         delayed_interruption=True,
         interruption_tail_ms=300,
+        interruption_fade_enabled=True,
+        interruption_fade_ms=200,
     ).model_dump()
 
     async def exercise() -> None:
@@ -50,6 +52,8 @@ def test_robot_interruption_settings_round_trip_in_local_storage(
             assert loaded["interjection_max_speech_ms"] == 700
             assert loaded["delayed_interruption"] is True
             assert loaded["interruption_tail_ms"] == 300
+            assert loaded["interruption_fade_enabled"] is True
+            assert loaded["interruption_fade_ms"] == 200
         finally:
             await store.close()
 

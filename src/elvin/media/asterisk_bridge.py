@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 from collections import deque
 from dataclasses import dataclass
 from typing import Any
@@ -12,6 +13,7 @@ from typing import Any
 from fastapi import WebSocket
 from starlette.websockets import WebSocketDisconnect
 
+from elvin.integrations.asterisk_ami import AsteriskAmiClient
 from elvin.media.audio import Pcm24To16Resampler, PlaybackEchoGuard
 from elvin.media.interruption import (
     InterruptionAction,
@@ -109,16 +111,10 @@ class AsteriskProtocol:
             # A barge-in can happen while MEDIA_XOFF is active. Re-check the
             # generation after the wait so stale audio is never released into
             # the channel after FLUSH_MEDIA.
-            if (
-                generation is not None
-                and generation != self.call.gemini.generation
-            ):
+            if generation is not None and generation != self.call.gemini.generation:
                 return False
             async with self.send_lock:
-                if (
-                    generation is not None
-                    and generation != self.call.gemini.generation
-                ):
+                if generation is not None and generation != self.call.gemini.generation:
                     return False
                 await self.websocket.send_bytes(chunk)
         return True
@@ -159,9 +155,7 @@ class AsteriskProtocol:
             if waiter is not None:
                 waiter.set()
         elif name == "DTMF_END":
-            self.call.timeline.add(
-                "ASTERISK_DTMF", digit=str(event.get("digit") or "")
-            )
+            self.call.timeline.add("ASTERISK_DTMF", digit=str(event.get("digit") or ""))
         elif name in {"HANGUP", "MEDIA_END"}:
             self.call.timeline.add("ASTERISK_HANGUP_EVENT", event=name)
         elif name == "STATUS":
@@ -212,6 +206,25 @@ class AsteriskGeminiBridge:
         self._pending_drain_turn: PendingCallerTurn | None = None
         self.interruption_policy = InterruptionPolicy.from_robot(call.robot)
         self.interruption_gate = LocalInterruptionGate(self.interruption_policy)
+        self.asterisk_ami = self._create_asterisk_ami_client()
+        self._voice_fade_task: asyncio.Task[None] | None = None
+        self._voice_gain_reset_task: asyncio.Task[None] | None = None
+
+    def _create_asterisk_ami_client(self) -> AsteriskAmiClient | None:
+        if self.interruption_policy.effective_fade_ms <= 0:
+            return None
+        app = getattr(self.websocket, "app", None)
+        state = getattr(app, "state", None)
+        settings = getattr(state, "settings", None)
+        if settings is None or not settings.asterisk_ami_configured:
+            return None
+        password = settings.asterisk_ami_password
+        return AsteriskAmiClient(
+            host=settings.asterisk_ami_host,
+            port=settings.asterisk_ami_port,
+            username=settings.asterisk_ami_username,
+            password=password.get_secret_value(),
+        )
 
     async def run(self) -> str:
         self.call.media_attached = True
@@ -226,6 +239,11 @@ class AsteriskGeminiBridge:
             ),
             delayed_interruption=self.interruption_policy.delayed_interruption,
             interruption_tail_ms=self.interruption_policy.effective_tail_ms,
+            interruption_fade_enabled=(
+                self.interruption_policy.interruption_fade_enabled
+            ),
+            interruption_fade_ms=self.interruption_policy.effective_fade_ms,
+            interruption_fade_available=self.asterisk_ami is not None,
         )
         input_task = asyncio.create_task(
             self._input_loop(), name=f"asterisk-input-{self.call.identity.call_id}"
@@ -275,6 +293,10 @@ class AsteriskGeminiBridge:
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             self.interruption_gate.reset()
+            await self._wait_voice_gain_reset()
+            await self._stop_voice_fade(reset_gain=True)
+            if self.asterisk_ami is not None:
+                await self.asterisk_ami.close()
             self.call.detector.set_bot_speaking(False)
             self.call.timeline.add("ASTERISK_BRIDGE_CLOSED", result=result)
 
@@ -329,13 +351,10 @@ class AsteriskGeminiBridge:
                 )
                 if (
                     echo_suppressed
-                    and asyncio.get_running_loop().time()
-                    - self._last_echo_event_at
+                    and asyncio.get_running_loop().time() - self._last_echo_event_at
                     >= 0.25
                 ):
-                    self._last_echo_event_at = (
-                        asyncio.get_running_loop().time()
-                    )
+                    self._last_echo_event_at = asyncio.get_running_loop().time()
                     self.call.timeline.add(
                         "PLAYBACK_ECHO_SUPPRESSED",
                         bytes=len(pcm),
@@ -348,17 +367,13 @@ class AsteriskGeminiBridge:
 
                 if decision.speech_started:
                     bot_playback_active = (
-                        decision.interrupted_bot
-                        or self.call.detector.bot_speaking
+                        decision.interrupted_bot or self.call.detector.bot_speaking
                     )
                     response_audio_active = (
                         bot_playback_active
                         or self.call.gemini.bot_audio_active.is_set()
                     )
-                    if (
-                        bot_playback_active
-                        and self.interruption_policy.enabled
-                    ):
+                    if bot_playback_active and self.interruption_policy.enabled:
                         self.interruption_gate.begin()
                         self.call.timeline.add(
                             "LOCAL_INTERRUPTION_CANDIDATE",
@@ -390,6 +405,7 @@ class AsteriskGeminiBridge:
                             buffered_bytes=gated.audio_bytes,
                             tail_ms=self.interruption_policy.effective_tail_ms,
                         )
+                        self._start_voice_fade()
                     if gated.action == InterruptionAction.IGNORE:
                         self.call.timeline.add(
                             "LOCAL_INTERJECTION_IGNORED",
@@ -408,17 +424,13 @@ class AsteriskGeminiBridge:
 
                 if decision.audio_to_gemini:
                     if self._pending_turn_audio is not None:
-                        self._pending_turn_audio.extend(
-                            decision.audio_to_gemini
-                        )
+                        self._pending_turn_audio.extend(decision.audio_to_gemini)
                         self._pending_turn_speech_ms = max(
                             self._pending_turn_speech_ms,
                             decision.speech_ms,
                         )
                     elif self._active_activity_started:
-                        await self._send_audio_to_gemini(
-                            decision.audio_to_gemini
-                        )
+                        await self._send_audio_to_gemini(decision.audio_to_gemini)
 
                 if decision.speech_ended:
                     if self._pending_turn_audio is not None:
@@ -472,9 +484,9 @@ class AsteriskGeminiBridge:
             self._pending_turn_speech_ms = 0.0
 
         if (
-            response_open_generation is not None and not response_audio_active
-        ) or (self._pending_drain_active and not response_audio_active) or (
-            self._active_activity_started and not response_audio_active
+            (response_open_generation is not None and not response_audio_active)
+            or (self._pending_drain_active and not response_audio_active)
+            or (self._active_activity_started and not response_audio_active)
         ):
             self._pending_turn_audio = bytearray()
             self._pending_turn_speech_ms = 0.0
@@ -494,9 +506,7 @@ class AsteriskGeminiBridge:
                 "BARGE_IN_FLUSH",
                 cleared_gemini_packets=cleared,
                 reason=(
-                    "bot_audio"
-                    if decision.interrupted_bot
-                    else "pending_response"
+                    "bot_audio" if decision.interrupted_bot else "pending_response"
                 ),
             )
             if pending_prefix:
@@ -516,6 +526,7 @@ class AsteriskGeminiBridge:
         reason: str = "local_interruption_policy",
     ) -> None:
         """Commit buffered caller audio at the single barge-in boundary."""
+        await self._stop_voice_fade(reset_gain=False)
         if self._pending_drain_active:
             await self._cancel_pending_drain()
         self._discard_pending_turns()
@@ -532,6 +543,7 @@ class AsteriskGeminiBridge:
         # packet already dequeued by the output task cannot cross the boundary.
         await self.call.gemini.start_activity()
         await self.protocol.command("FLUSH_MEDIA")
+        self._schedule_voice_gain_reset()
         self.echo_guard.clear()
         self._last_output_submission_at = 0.0
         self.call.detector.set_bot_speaking(False)
@@ -553,6 +565,7 @@ class AsteriskGeminiBridge:
             buffered_bytes=len(audio),
             speech_ended=speech_ended,
             tail_ms=self.interruption_policy.effective_tail_ms,
+            fade_ms=self.interruption_policy.effective_fade_ms,
         )
 
     def _schedule_pending_turn_drain(self) -> None:
@@ -666,6 +679,7 @@ class AsteriskGeminiBridge:
                 tail_ms=self.interruption_policy.effective_tail_ms,
                 origin="pending_turn",
             )
+            self._start_voice_fade()
         if gated.action == InterruptionAction.IGNORE:
             self.call.timeline.add(
                 "LOCAL_INTERJECTION_IGNORED",
@@ -684,6 +698,113 @@ class AsteriskGeminiBridge:
             return True
         return False
 
+    def _start_voice_fade(self) -> None:
+        fade_ms = self.interruption_policy.effective_fade_ms
+        tail_ms = self.interruption_policy.effective_tail_ms
+        if fade_ms <= 0:
+            return
+        if self.asterisk_ami is None or not self.protocol.info.channel:
+            self.call.timeline.add(
+                "INTERRUPTION_VOICE_FADE_UNAVAILABLE",
+                fade_ms=fade_ms,
+                ami_configured=self.asterisk_ami is not None,
+                channel_available=bool(self.protocol.info.channel),
+            )
+            return
+        task = self._voice_fade_task
+        if task is not None and not task.done():
+            return
+        self._voice_fade_task = asyncio.create_task(
+            self._run_voice_fade(tail_ms=tail_ms, fade_ms=fade_ms),
+            name=f"asterisk-voice-fade-{self.call.identity.call_id}",
+        )
+        self.call.timeline.add(
+            "INTERRUPTION_VOICE_FADE_SCHEDULED",
+            tail_ms=tail_ms,
+            fade_ms=fade_ms,
+            starts_after_ms=tail_ms - fade_ms,
+        )
+
+    async def _run_voice_fade(self, *, tail_ms: int, fade_ms: int) -> None:
+        ami = self.asterisk_ami
+        channel = self.protocol.info.channel
+        if ami is None or not channel:
+            return
+        loop = asyncio.get_running_loop()
+        fade_starts_at = loop.time() + (tail_ms - fade_ms) / 1000.0
+        try:
+            delay = fade_starts_at - loop.time()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            self.call.timeline.add(
+                "INTERRUPTION_VOICE_FADE_STARTED",
+                fade_ms=fade_ms,
+            )
+            step_count = max(2, min(40, math.ceil(fade_ms / 20)))
+            duration_seconds = fade_ms / 1000.0
+            for step in range(1, step_count + 1):
+                target = fade_starts_at + duration_seconds * (step / step_count)
+                delay = target - loop.time()
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                gain = max(0.001, 1.0 - step / step_count)
+                await ami.set_channel_rx_gain(channel, gain)
+            self.call.timeline.add(
+                "INTERRUPTION_VOICE_FADE_COMPLETED",
+                fade_ms=fade_ms,
+                steps=step_count,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.call.timeline.add(
+                "INTERRUPTION_VOICE_FADE_ERROR",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            await self._reset_voice_gain()
+
+    async def _stop_voice_fade(self, *, reset_gain: bool) -> None:
+        task = getattr(self, "_voice_fade_task", None)
+        self._voice_fade_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        if reset_gain:
+            await self._reset_voice_gain()
+
+    def _schedule_voice_gain_reset(self) -> None:
+        if getattr(self, "asterisk_ami", None) is None:
+            return
+        task = getattr(self, "_voice_gain_reset_task", None)
+        if task is not None and not task.done():
+            return
+        self._voice_gain_reset_task = asyncio.create_task(
+            self._reset_voice_gain(),
+            name=f"asterisk-voice-gain-reset-{self.call.identity.call_id}",
+        )
+
+    async def _wait_voice_gain_reset(self) -> None:
+        task = getattr(self, "_voice_gain_reset_task", None)
+        if task is None:
+            return
+        await asyncio.gather(task, return_exceptions=True)
+        if self._voice_gain_reset_task is task:
+            self._voice_gain_reset_task = None
+
+    async def _reset_voice_gain(self) -> None:
+        ami = getattr(self, "asterisk_ami", None)
+        channel = self.protocol.info.channel
+        if ami is None or not channel:
+            return
+        try:
+            await ami.set_channel_rx_gain(channel, 1.0)
+            self.call.timeline.add("INTERRUPTION_VOICE_GAIN_RESET")
+        except Exception as exc:
+            self.call.timeline.add(
+                "INTERRUPTION_VOICE_GAIN_RESET_ERROR",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+
     async def _send_audio_to_gemini(self, pcm16: bytes) -> None:
         """Send input in 20–40 ms chunks, including buffered pre-roll."""
         if not pcm16:
@@ -691,9 +812,7 @@ class AsteriskGeminiBridge:
         # 40 ms at 16 kHz, mono, signed 16-bit PCM.
         chunk_bytes = 1_280
         for offset in range(0, len(pcm16), chunk_bytes):
-            await self.call.gemini.send_audio(
-                pcm16[offset : offset + chunk_bytes]
-            )
+            await self.call.gemini.send_audio(pcm16[offset : offset + chunk_bytes])
 
     async def _drain_pending_turns(self) -> None:
         while self._pending_turns and not self._closed:
@@ -826,6 +945,7 @@ class AsteriskGeminiBridge:
                     continue
                 if await self._promote_pending_turn_on_model_audio():
                     continue
+                await self._wait_voice_gain_reset()
                 pcm16 = self.resampler.convert(packet.pcm24)
                 if not pcm16:
                     continue
@@ -873,17 +993,13 @@ class AsteriskGeminiBridge:
             return
         wire_chunk = chunk
         background_audio = getattr(self, "background_audio", None)
-        voice_submission_active = getattr(
-            self, "_voice_submission_active", None
-        )
+        voice_submission_active = getattr(self, "_voice_submission_active", None)
         if background_audio is not None:
             wire_chunk = await background_audio.mix_with_voice(chunk)
             if voice_submission_active is not None:
                 voice_submission_active.set()
         try:
-            sent = await self.protocol.send_media(
-                wire_chunk, generation=generation
-            )
+            sent = await self.protocol.send_media(wire_chunk, generation=generation)
             if not sent:
                 return
             self.call.detector.set_bot_speaking(True)
@@ -906,9 +1022,7 @@ class AsteriskGeminiBridge:
         loop = asyncio.get_running_loop()
         sent_at = loop.time()
         previous_sent_at = getattr(self, "_last_output_submission_at", 0.0)
-        previous_generation = getattr(
-            self, "_last_output_submission_generation", None
-        )
+        previous_generation = getattr(self, "_last_output_submission_generation", None)
         if previous_sent_at and previous_generation == generation:
             actual_gap_ms = (sent_at - previous_sent_at) * 1000.0
             if actual_gap_ms >= 100.0:
@@ -919,9 +1033,7 @@ class AsteriskGeminiBridge:
                     bytes=len(chunk),
                 )
         self._last_output_submission_at = sent_at
-        self._last_output_submission_generation = (
-            self.call.gemini.generation
-        )
+        self._last_output_submission_generation = self.call.gemini.generation
 
     async def _background_loop(self) -> None:
         """Pace the optional loop only on the Asterisk outbound leg."""
@@ -936,12 +1048,8 @@ class AsteriskGeminiBridge:
         loop = asyncio.get_running_loop()
         next_tick = loop.time()
         while not self._closed:
-            ptime_seconds = max(
-                0.01, float(self.protocol.info.ptime or 20) / 1000.0
-            )
-            frame_size = max(
-                2, int(self.protocol.info.optimal_frame_size or 640)
-            )
+            ptime_seconds = max(0.01, float(self.protocol.info.ptime or 20) / 1000.0)
+            frame_size = max(2, int(self.protocol.info.optimal_frame_size or 640))
             frame_size -= frame_size % 2
             # Voice batches already carry the mixed background. Do not enqueue
             # separate background frames while model playback is active.
@@ -989,9 +1097,7 @@ class AsteriskGeminiBridge:
             # to Asterisk, then place a marker behind them in Asterisk's queue.
             try:
                 await self.call.gemini.output_audio.join()
-                await self._send_output_audio(
-                    b"", generation=generation, flush=True
-                )
+                await self._send_output_audio(b"", generation=generation, flush=True)
                 correlation_id = f"elvin-{generation}"
                 try:
                     waiter = await self.protocol.mark(correlation_id)

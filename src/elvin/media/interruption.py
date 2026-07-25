@@ -17,6 +17,8 @@ MAX_INTERJECTION_SPEECH_MS = 2_000
 DEFAULT_INTERJECTION_SPEECH_MS = 650
 MAX_INTERRUPTION_TAIL_MS = 2_000
 DEFAULT_INTERRUPTION_TAIL_MS = 250
+MAX_INTERRUPTION_FADE_MS = 2_000
+DEFAULT_INTERRUPTION_FADE_MS = 200
 
 
 def _bounded_int(value: object, *, default: int, minimum: int, maximum: int) -> int:
@@ -35,6 +37,8 @@ class InterruptionPolicy:
     interjection_max_speech_ms: int = DEFAULT_INTERJECTION_SPEECH_MS
     delayed_interruption: bool = False
     interruption_tail_ms: int = DEFAULT_INTERRUPTION_TAIL_MS
+    interruption_fade_enabled: bool = False
+    interruption_fade_ms: int = DEFAULT_INTERRUPTION_FADE_MS
 
     @classmethod
     def from_robot(cls, robot: dict[str, Any]) -> "InterruptionPolicy":
@@ -55,6 +59,15 @@ class InterruptionPolicy:
                 minimum=0,
                 maximum=MAX_INTERRUPTION_TAIL_MS,
             ),
+            interruption_fade_enabled=bool(
+                robot.get("interruption_fade_enabled", False)
+            ),
+            interruption_fade_ms=_bounded_int(
+                robot.get("interruption_fade_ms"),
+                default=DEFAULT_INTERRUPTION_FADE_MS,
+                minimum=0,
+                maximum=MAX_INTERRUPTION_FADE_MS,
+            ),
         )
 
     @property
@@ -64,6 +77,12 @@ class InterruptionPolicy:
     @property
     def effective_tail_ms(self) -> int:
         return self.interruption_tail_ms if self.delayed_interruption else 0
+
+    @property
+    def effective_fade_ms(self) -> int:
+        if not self.interruption_fade_enabled:
+            return 0
+        return min(self.interruption_fade_ms, self.effective_tail_ms)
 
 
 class InterruptionAction(StrEnum):

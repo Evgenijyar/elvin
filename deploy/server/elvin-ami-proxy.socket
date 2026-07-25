@@ -1,0 +1,11 @@
+[Unit]
+Description=Elvin Docker-to-local-Asterisk AMI proxy socket
+Requires=docker.service
+After=docker.service
+
+[Socket]
+ListenStream=172.17.0.1:5039
+NoDelay=true
+
+[Install]
+WantedBy=sockets.target

@@ -270,12 +270,9 @@ def test_pending_drain_coalesces_queue_before_opening_activity() -> None:
 
     assert activity_calls == ["start", "end"]
     assert b"".join(sent_to_gemini) == b"a" * 1_000 + b"b" * 1_000
-    assert sum(
-        name == "PENDING_TURN_SENT" for name, _payload in timeline.events
-    ) == 1
+    assert sum(name == "PENDING_TURN_SENT" for name, _payload in timeline.events) == 1
     assert any(
-        name == "PENDING_TURNS_COALESCED"
-        and payload["segments"] == 2
+        name == "PENDING_TURNS_COALESCED" and payload["segments"] == 2
         for name, payload in timeline.events
     )
 
@@ -336,13 +333,11 @@ def test_pending_turn_promotes_on_first_model_audio() -> None:
     assert [len(chunk) for chunk in sent_audio] == [1280, 720]
     assert bridge._pending_turns == deque()
     assert any(
-        name == "PENDING_TURN_PROMOTED"
-        and payload["segments"] == 1
+        name == "PENDING_TURN_PROMOTED" and payload["segments"] == 1
         for name, payload in timeline.events
     )
     assert any(
-        name == "BARGE_IN_FLUSH"
-        and payload["reason"] == "pending_turn_promoted"
+        name == "BARGE_IN_FLUSH" and payload["reason"] == "pending_turn_promoted"
         for name, payload in timeline.events
     )
 
@@ -381,9 +376,7 @@ def test_short_pending_interjection_does_not_cancel_model_audio() -> None:
     )
     bridge = object.__new__(AsteriskGeminiBridge)
     bridge.call = SimpleNamespace(timeline=timeline)
-    bridge._pending_turns = deque(
-        [PendingCallerTurn(audio=b"short", speech_ms=240)]
-    )
+    bridge._pending_turns = deque([PendingCallerTurn(audio=b"short", speech_ms=240)])
     bridge._pending_turn_audio = None
     bridge._pending_turn_speech_ms = 0.0
     bridge._pending_drain_active = False
@@ -397,9 +390,59 @@ def test_short_pending_interjection_does_not_cancel_model_audio() -> None:
     assert not asyncio.run(exercise())
     assert bridge._pending_turns == deque()
     assert any(
-        name == "LOCAL_INTERJECTION_IGNORED"
-        and payload["origin"] == "pending_turn"
+        name == "LOCAL_INTERJECTION_IGNORED" and payload["origin"] == "pending_turn"
         for name, payload in timeline.events
+    )
+
+
+def test_confirmed_interruption_fades_only_until_gain_reset() -> None:
+    gains: list[float] = []
+
+    class _FakeAmi:
+        async def set_channel_rx_gain(
+            self,
+            channel: str,
+            gain: float,
+        ) -> None:
+            assert channel == "WebSocket/elvin/1"
+            gains.append(gain)
+
+    timeline = _FakeTimeline()
+    bridge = object.__new__(AsteriskGeminiBridge)
+    bridge.call = SimpleNamespace(
+        timeline=timeline,
+        identity=SimpleNamespace(call_id="fade-test"),
+    )
+    bridge.protocol = SimpleNamespace(
+        info=AsteriskMediaInfo(channel="WebSocket/elvin/1")
+    )
+    bridge.interruption_policy = InterruptionPolicy(
+        delayed_interruption=True,
+        interruption_tail_ms=100,
+        interruption_fade_enabled=True,
+        interruption_fade_ms=100,
+    )
+    bridge.asterisk_ami = _FakeAmi()
+    bridge._voice_fade_task = None
+    bridge._voice_gain_reset_task = None
+
+    async def exercise() -> None:
+        bridge._start_voice_fade()
+        await bridge._voice_fade_task
+        await bridge._stop_voice_fade(reset_gain=True)
+
+    asyncio.run(exercise())
+
+    assert gains
+    assert gains[-1] == 1.0
+    assert all(left > right for left, right in zip(gains[:-2], gains[1:-1]))
+    assert gains[-2] == 0.001
+    assert any(
+        name == "INTERRUPTION_VOICE_FADE_COMPLETED"
+        for name, _payload in timeline.events
+    )
+    assert any(
+        name == "INTERRUPTION_VOICE_GAIN_RESET" for name, _payload in timeline.events
     )
 
 
@@ -462,8 +505,7 @@ def test_committed_local_interruption_uses_single_flush_boundary() -> None:
     assert commands == ["FLUSH_MEDIA"]
     assert [len(chunk) for chunk in sent_audio] == [1280, 720]
     assert any(
-        name == "BARGE_IN_FLUSH"
-        and payload["reason"] == "local_interruption_policy"
+        name == "BARGE_IN_FLUSH" and payload["reason"] == "local_interruption_policy"
         for name, payload in timeline.events
     )
 
@@ -611,8 +653,7 @@ def test_short_interjection_during_playback_never_reaches_gemini() -> None:
     assert result == "caller_hangup"
     assert gemini.calls == []
     assert any(
-        name == "LOCAL_INTERJECTION_IGNORED"
-        for name, _payload in timeline.events
+        name == "LOCAL_INTERJECTION_IGNORED" for name, _payload in timeline.events
     )
 
 

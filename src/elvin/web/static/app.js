@@ -81,6 +81,8 @@ function bindEvents() {
     $("#robotInterjectionMaxSpeechMs").addEventListener("input", renderInterruptionEffects);
     $("#robotDelayedInterruption").addEventListener("change", renderInterruptionEffects);
     $("#robotInterruptionTailMs").addEventListener("input", renderInterruptionEffects);
+    $("#robotInterruptionFadeEnabled").addEventListener("change", renderInterruptionEffects);
+    $("#robotInterruptionFadeMs").addEventListener("input", renderInterruptionEffects);
     $("#openAssignmentModal").addEventListener("click", openAssignmentModal);
     $$('[data-open-assignment]').forEach((button) => button.addEventListener("click", openAssignmentModal));
     $$('[data-close-modal]').forEach((button) => button.addEventListener("click", closeAssignmentModal));
@@ -649,6 +651,8 @@ function renderRobotEditor() {
     $("#robotInterjectionMaxSpeechMs").value = robot.interjection_max_speech_ms ?? 650;
     $("#robotDelayedInterruption").checked = Boolean(robot.delayed_interruption);
     $("#robotInterruptionTailMs").value = robot.interruption_tail_ms ?? 250;
+    $("#robotInterruptionFadeEnabled").checked = Boolean(robot.interruption_fade_enabled);
+    $("#robotInterruptionFadeMs").value = robot.interruption_fade_ms ?? 200;
     renderTemperature();
     renderInterruptionEffects();
     const key = $("#geminiKeyStatus");
@@ -667,10 +671,18 @@ function renderInterruptionEffects() {
     const delayed = $("#robotDelayedInterruption").checked;
     const speechMs = Number($("#robotInterjectionMaxSpeechMs").value || 650);
     const tailMs = Number($("#robotInterruptionTailMs").value || 250);
+    const fadeEnabled = $("#robotInterruptionFadeEnabled").checked;
+    const fadeInput = $("#robotInterruptionFadeMs");
+    fadeInput.max = String(Math.max(0, tailMs));
+    if (Number(fadeInput.value) > tailMs) fadeInput.value = String(tailMs);
+    const fadeMs = Number(fadeInput.value || 0);
     $("#robotInterjectionMaxSpeechMs").disabled = !ignoreShort;
     $("#robotInterruptionTailMs").disabled = !delayed;
+    $("#robotInterruptionFadeEnabled").disabled = !delayed;
+    fadeInput.disabled = !delayed || !fadeEnabled;
     $("#interjectionSpeechValue").textContent = `${speechMs} мс`;
     $("#interruptionTailValue").textContent = `${tailMs} мс`;
+    $("#interruptionFadeValue").textContent = `${fadeMs} мс`;
 }
 
 async function createRobot() {
@@ -696,6 +708,8 @@ async function createRobot() {
                 interjection_max_speech_ms: 650,
                 delayed_interruption: false,
                 interruption_tail_ms: 250,
+                interruption_fade_enabled: false,
+                interruption_fade_ms: 200,
                 active: true,
             }),
         });
@@ -730,6 +744,8 @@ async function saveRobot(event) {
         interjection_max_speech_ms: Number($("#robotInterjectionMaxSpeechMs").value),
         delayed_interruption: $("#robotDelayedInterruption").checked,
         interruption_tail_ms: Number($("#robotInterruptionTailMs").value),
+        interruption_fade_enabled: $("#robotInterruptionFadeEnabled").checked,
+        interruption_fade_ms: Number($("#robotInterruptionFadeMs").value),
         active: true,
     };
     if (!payload.name) {

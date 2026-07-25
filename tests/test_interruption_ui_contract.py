@@ -10,6 +10,8 @@ def test_effects_ui_contains_only_local_interruption_controls() -> None:
         "robotInterjectionMaxSpeechMs",
         "robotDelayedInterruption",
         "robotInterruptionTailMs",
+        "robotInterruptionFadeEnabled",
+        "robotInterruptionFadeMs",
     ):
         assert f'id="{control_id}"' in html
         assert f'$("#{control_id}")' in javascript

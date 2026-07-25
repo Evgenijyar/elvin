@@ -157,6 +157,18 @@
                                                 <input id="robotInterruptionTailMs" type="range" min="0" max="2000" step="50" value="250">
                                             </label>
                                         </section>
+
+                                        <section class="effect-card">
+                                            <label class="effect-toggle">
+                                                <input id="robotInterruptionFadeEnabled" type="checkbox">
+                                                <span>Затихание голоса</span>
+                                            </label>
+                                            <p>При подтверждённом перебивании громкость текущей реплики плавно снижается к концу речевого хвоста. Следующий ответ всегда начинается с обычной громкостью. Эффект работает совместно с отсрочкой перебивания.</p>
+                                            <label class="effect-range">
+                                                <span>Длина затихающей части хвоста: <b id="interruptionFadeValue">200 мс</b></span>
+                                                <input id="robotInterruptionFadeMs" type="range" min="0" max="2000" step="50" value="200">
+                                            </label>
+                                        </section>
                                     </div>
                                 </div>
 

@@ -88,7 +88,24 @@ chmod +x deploy/server/elvin-deploy.sh
 ln -sfn "$APP_DIR/deploy/server/elvin-deploy.sh" /usr/local/bin/elvin-deploy
 ln -sfn "$APP_DIR/deploy/server/elvin-deploy.sh" /usr/local/sbin/elvin-deploy
 
-required=(pyproject.toml uv.lock media-requirements.txt Dockerfile.deps Dockerfile)
+# Asterisk AMI intentionally listens on host loopback only. Expose it solely
+# on the Docker bridge through a systemd socket proxy, never on a public
+# interface. The backend uses this real-time control path only for the optional
+# interruption-tail voice fade.
+install -m 0644 deploy/server/elvin-ami-proxy.socket \
+  /etc/systemd/system/elvin-ami-proxy.socket
+install -m 0644 deploy/server/elvin-ami-proxy.service \
+  /etc/systemd/system/elvin-ami-proxy.service
+systemctl daemon-reload
+systemctl enable --now elvin-ami-proxy.socket >/dev/null
+systemctl is-active --quiet elvin-ami-proxy.socket \
+  || die "Asterisk AMI proxy socket failed to start"
+
+required=(
+  pyproject.toml uv.lock media-requirements.txt Dockerfile.deps Dockerfile
+  deploy/server/elvin-ami-proxy.socket
+  deploy/server/elvin-ami-proxy.service
+)
 for file in "${required[@]}"; do
   [[ -f "$file" ]] || die "required file is missing: ${file}"
 done
@@ -126,8 +143,11 @@ BASE_ARGS=(
   --log-driver local
   --log-opt max-size=50m
   --log-opt max-file=5
+  --add-host host.docker.internal:host-gateway
   -e ELVIN_BIND_HOST=0.0.0.0
   -e ELVIN_BIND_PORT=8000
+  -e ASTERISK_AMI_HOST=host.docker.internal
+  -e ASTERISK_AMI_PORT=5039
   -v "$DATA_DIR:/opt/lead-voice/data"
   -v "$LOG_DIR:/opt/lead-voice/logs"
   -v "$RECORDINGS_DIR:/opt/lead-voice/recordings"
