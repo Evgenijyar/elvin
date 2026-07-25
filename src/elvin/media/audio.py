@@ -390,3 +390,18 @@ class AsyncWaveWriter:
                 output.writeframesraw(chunk)
                 await asyncio.sleep(0)
             output.writeframes(b"")
+
+
+class DiscardingWaveWriter:
+    """No-op writer used when per-call audio retention is disabled."""
+
+    dropped = 0
+
+    async def start(self) -> None:
+        return
+
+    def submit(self, pcm: bytes) -> None:
+        return
+
+    async def close(self) -> None:
+        return

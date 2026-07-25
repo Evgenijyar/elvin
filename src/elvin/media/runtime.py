@@ -8,7 +8,11 @@ from pathlib import Path
 from typing import Any
 
 from elvin.integrations.gemini_live import GeminiLiveSession
-from elvin.media.audio import AsyncWaveWriter, TELEPHONY_SAMPLE_RATE
+from elvin.media.audio import (
+    AsyncWaveWriter,
+    DiscardingWaveWriter,
+    TELEPHONY_SAMPLE_RATE,
+)
 from elvin.media.background_audio import LoopingBackgroundAudio
 from elvin.media.turn_detector import LocalTurnDetector, TurnDetectorConfig
 from elvin.observability.frame_trace import FrameTraceWriter
@@ -41,26 +45,32 @@ class PreparedVoiceCall:
         api_key: str,
         recordings_dir: Path,
         trace_enabled: bool,
+        recordings_enabled: bool,
         turn_config: TurnDetectorConfig,
         background_audio_path: Path | None = None,
         background_audio_volume: int = 0,
     ) -> None:
         self.identity = identity
         self.robot = robot
+        self.recordings_enabled = recordings_enabled
         self.call_dir = recordings_dir / identity.call_id
         self.timeline = CallTimeline(identity.call_id, self.call_dir)
         self.frame_trace = FrameTraceWriter(
             self.call_dir / "frames.ndjson.gz",
-            enabled=trace_enabled,
+            enabled=trace_enabled and recordings_enabled,
         )
-        self.caller_audio = AsyncWaveWriter(
-            self.call_dir / "caller-in.wav",
-            sample_rate=TELEPHONY_SAMPLE_RATE,
-        )
-        self.bot_audio = AsyncWaveWriter(
-            self.call_dir / "bot-to-asterisk.wav",
-            sample_rate=TELEPHONY_SAMPLE_RATE,
-        )
+        if recordings_enabled:
+            self.caller_audio = AsyncWaveWriter(
+                self.call_dir / "caller-in.wav",
+                sample_rate=TELEPHONY_SAMPLE_RATE,
+            )
+            self.bot_audio = AsyncWaveWriter(
+                self.call_dir / "bot-to-asterisk.wav",
+                sample_rate=TELEPHONY_SAMPLE_RATE,
+            )
+        else:
+            self.caller_audio = DiscardingWaveWriter()
+            self.bot_audio = DiscardingWaveWriter()
         self.detector = LocalTurnDetector(
             config=turn_config,
             timeline=self.timeline,
@@ -78,7 +88,8 @@ class PreparedVoiceCall:
         self._closed = False
 
     async def prepare(self) -> None:
-        self.call_dir.mkdir(parents=True, exist_ok=True)
+        if self.recordings_enabled:
+            self.call_dir.mkdir(parents=True, exist_ok=True)
         await self.frame_trace.start()
         await self.caller_audio.start()
         await self.bot_audio.start()
@@ -120,7 +131,8 @@ class PreparedVoiceCall:
                 caller_wav_dropped=self.caller_audio.dropped,
                 bot_wav_dropped=self.bot_audio.dropped,
             )
-            await self.timeline.save()
+            if self.recordings_enabled:
+                await self.timeline.save()
 
 
 class VoiceRuntime:
@@ -129,10 +141,12 @@ class VoiceRuntime:
         *,
         recordings_dir: Path,
         trace_enabled: bool = True,
+        recordings_enabled: bool = True,
         turn_config: TurnDetectorConfig | None = None,
     ) -> None:
         self.recordings_dir = recordings_dir
         self.trace_enabled = trace_enabled
+        self.recordings_enabled = recordings_enabled
         self.turn_config = turn_config or TurnDetectorConfig()
 
     async def prepare_call(
@@ -150,6 +164,7 @@ class VoiceRuntime:
             api_key=api_key,
             recordings_dir=self.recordings_dir,
             trace_enabled=self.trace_enabled,
+            recordings_enabled=self.recordings_enabled,
             turn_config=self.turn_config,
             background_audio_path=background_audio_path,
             background_audio_volume=background_audio_volume,

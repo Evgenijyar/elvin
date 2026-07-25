@@ -88,6 +88,11 @@ chmod +x deploy/server/elvin-deploy.sh
 ln -sfn "$APP_DIR/deploy/server/elvin-deploy.sh" /usr/local/bin/elvin-deploy
 ln -sfn "$APP_DIR/deploy/server/elvin-deploy.sh" /usr/local/sbin/elvin-deploy
 
+# Disable unbounded Asterisk/syslog and call-artifact retention before starting
+# the new backend. This is idempotent and also cleans files accumulated earlier.
+chmod +x deploy/server/elvin-disable-persistence.sh
+deploy/server/elvin-disable-persistence.sh
+
 # Asterisk AMI intentionally listens on host loopback only. Expose it solely
 # on the Docker bridge through a systemd socket proxy, never on a public
 # interface. The backend uses this real-time control path only for the optional
@@ -105,6 +110,10 @@ required=(
   pyproject.toml uv.lock media-requirements.txt Dockerfile.deps Dockerfile
   deploy/server/elvin-ami-proxy.socket
   deploy/server/elvin-ami-proxy.service
+  deploy/server/asterisk-logger.conf
+  deploy/server/elvin-asterisk-no-output.conf
+  deploy/server/elvin-rsyslog-drop-asterisk.conf
+  deploy/server/elvin-disable-persistence.sh
 )
 for file in "${required[@]}"; do
   [[ -f "$file" ]] || die "required file is missing: ${file}"
@@ -148,6 +157,9 @@ BASE_ARGS=(
   -e ELVIN_BIND_PORT=8000
   -e ASTERISK_AMI_HOST=host.docker.internal
   -e ASTERISK_AMI_PORT=5039
+  # Production must not retain call audio or per-call diagnostic artifacts.
+  -e ELVIN_RECORDINGS_ENABLED=false
+  -e ELVIN_FRAME_TRACE_ENABLED=false
   -v "$DATA_DIR:/opt/lead-voice/data"
   -v "$LOG_DIR:/opt/lead-voice/logs"
   -v "$RECORDINGS_DIR:/opt/lead-voice/recordings"

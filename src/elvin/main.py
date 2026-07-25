@@ -53,6 +53,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     voice_runtime = VoiceRuntime(
         recordings_dir=app_settings.recordings_dir,
         trace_enabled=app_settings.frame_trace_enabled,
+        recordings_enabled=app_settings.recordings_enabled,
         turn_config=TurnDetectorConfig(
             vad_confidence=app_settings.vad_confidence,
             vad_start_secs=app_settings.vad_start_seconds,
