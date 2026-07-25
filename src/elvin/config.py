@@ -151,7 +151,7 @@ class Settings(BaseSettings):
         default=True, validation_alias="ELVIN_FRAME_TRACE_ENABLED"
     )
     recordings_enabled: bool = Field(
-        default=True, validation_alias="ELVIN_RECORDINGS_ENABLED"
+        default=False, validation_alias="ELVIN_RECORDINGS_ENABLED"
     )
     vad_confidence: float = Field(
         default=0.45, ge=0.05, le=0.99, validation_alias="ELVIN_VAD_CONFIDENCE"
