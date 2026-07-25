@@ -30,6 +30,10 @@ ROBOT_DEFAULTS: dict[str, Any] = {
     "callback_condition": "",
     "stop_list_condition": "",
     "answering_machine_condition": "",
+    "ignore_short_interjections": False,
+    "interjection_max_speech_ms": 650,
+    "delayed_interruption": False,
+    "interruption_tail_ms": 250,
 }
 
 ASSIGNMENT_DEFAULTS: dict[str, Any] = {
@@ -196,6 +200,10 @@ class StateStore:
                 "ALTER TABLE app.robot_profiles ADD COLUMN IF NOT EXISTS callback_condition TEXT NOT NULL DEFAULT ''",
                 "ALTER TABLE app.robot_profiles ADD COLUMN IF NOT EXISTS stop_list_condition TEXT NOT NULL DEFAULT ''",
                 "ALTER TABLE app.robot_profiles ADD COLUMN IF NOT EXISTS answering_machine_condition TEXT NOT NULL DEFAULT ''",
+                "ALTER TABLE app.robot_profiles ADD COLUMN IF NOT EXISTS ignore_short_interjections BOOLEAN NOT NULL DEFAULT FALSE",
+                "ALTER TABLE app.robot_profiles ADD COLUMN IF NOT EXISTS interjection_max_speech_ms INTEGER NOT NULL DEFAULT 650",
+                "ALTER TABLE app.robot_profiles ADD COLUMN IF NOT EXISTS delayed_interruption BOOLEAN NOT NULL DEFAULT FALSE",
+                "ALTER TABLE app.robot_profiles ADD COLUMN IF NOT EXISTS interruption_tail_ms INTEGER NOT NULL DEFAULT 250",
                 "ALTER TABLE app.project_robot_assignments ADD COLUMN IF NOT EXISTS lead_stage_id BIGINT",
                 "ALTER TABLE app.project_robot_assignments ADD COLUMN IF NOT EXISTS lead_stage_name TEXT NOT NULL DEFAULT ''",
                 "ALTER TABLE app.project_robot_assignments ADD COLUMN IF NOT EXISTS special_stage_id BIGINT",
@@ -351,6 +359,8 @@ class StateStore:
                        first_phrase, lead_condition, special_condition,
                        refusal_condition, callback_condition,
                        stop_list_condition, answering_machine_condition,
+                       ignore_short_interjections, interjection_max_speech_ms,
+                       delayed_interruption, interruption_tail_ms,
                        active, created_at, updated_at
                 FROM app.robot_profiles
                 ORDER BY updated_at DESC, name ASC
@@ -398,6 +408,18 @@ class StateStore:
             "answering_machine_condition": payload.get(
                 "answering_machine_condition", ""
             ),
+            "ignore_short_interjections": bool(
+                payload.get("ignore_short_interjections", False)
+            ),
+            "interjection_max_speech_ms": int(
+                payload.get("interjection_max_speech_ms", 650)
+            ),
+            "delayed_interruption": bool(
+                payload.get("delayed_interruption", False)
+            ),
+            "interruption_tail_ms": int(
+                payload.get("interruption_tail_ms", 250)
+            ),
             "active": bool(payload.get("active", True)),
             "created_at": now,
             "updated_at": now,
@@ -410,16 +432,21 @@ class StateStore:
                     temperature, role_prompt, knowledge_base,
                     first_phrase, lead_condition, special_condition,
                     refusal_condition, callback_condition,
-                    stop_list_condition, answering_machine_condition, active
+                    stop_list_condition, answering_machine_condition,
+                    ignore_short_interjections, interjection_max_speech_ms,
+                    delayed_interruption, interruption_tail_ms, active
                 ) VALUES(
                     $1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                    $11, $12, $13, $14, $15, $16
+                    $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
                 )
                 RETURNING id, name, description, model_id, voice_name,
                           temperature, role_prompt, knowledge_base,
                           first_phrase, lead_condition, special_condition,
                           refusal_condition, callback_condition,
                           stop_list_condition, answering_machine_condition,
+                          ignore_short_interjections,
+                          interjection_max_speech_ms, delayed_interruption,
+                          interruption_tail_ms,
                           active, created_at, updated_at
                 """,
                 robot_id,
@@ -437,6 +464,10 @@ class StateStore:
                 item["callback_condition"],
                 item["stop_list_condition"],
                 item["answering_machine_condition"],
+                item["ignore_short_interjections"],
+                item["interjection_max_speech_ms"],
+                item["delayed_interruption"],
+                item["interruption_tail_ms"],
                 item["active"],
             )
             return self._robot_row(row)
@@ -460,13 +491,19 @@ class StateStore:
                     first_phrase=$9, lead_condition=$10, special_condition=$11,
                     refusal_condition=$12, callback_condition=$13,
                     stop_list_condition=$14, answering_machine_condition=$15,
-                    active=$16, updated_at=NOW()
+                    ignore_short_interjections=$16,
+                    interjection_max_speech_ms=$17,
+                    delayed_interruption=$18, interruption_tail_ms=$19,
+                    active=$20, updated_at=NOW()
                 WHERE id=$1::uuid
                 RETURNING id, name, description, model_id, voice_name,
                           temperature, role_prompt, knowledge_base,
                           first_phrase, lead_condition, special_condition,
                           refusal_condition, callback_condition,
                           stop_list_condition, answering_machine_condition,
+                          ignore_short_interjections,
+                          interjection_max_speech_ms, delayed_interruption,
+                          interruption_tail_ms,
                           active, created_at, updated_at
                 """,
                 robot_id,
@@ -484,6 +521,10 @@ class StateStore:
                 payload.get("callback_condition", ""),
                 payload.get("stop_list_condition", ""),
                 payload.get("answering_machine_condition", ""),
+                bool(payload.get("ignore_short_interjections", False)),
+                int(payload.get("interjection_max_speech_ms", 650)),
+                bool(payload.get("delayed_interruption", False)),
+                int(payload.get("interruption_tail_ms", 250)),
                 bool(payload.get("active", True)),
             )
             return self._robot_row(row) if row else None
@@ -515,6 +556,18 @@ class StateStore:
                     "stop_list_condition": payload.get("stop_list_condition", ""),
                     "answering_machine_condition": payload.get(
                         "answering_machine_condition", ""
+                    ),
+                    "ignore_short_interjections": bool(
+                        payload.get("ignore_short_interjections", False)
+                    ),
+                    "interjection_max_speech_ms": int(
+                        payload.get("interjection_max_speech_ms", 650)
+                    ),
+                    "delayed_interruption": bool(
+                        payload.get("delayed_interruption", False)
+                    ),
+                    "interruption_tail_ms": int(
+                        payload.get("interruption_tail_ms", 250)
                     ),
                     "active": bool(payload.get("active", True)),
                     "updated_at": datetime.now(UTC).isoformat(),

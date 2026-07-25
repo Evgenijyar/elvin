@@ -77,6 +77,10 @@ function bindEvents() {
     $("#robotEditor").addEventListener("submit", saveRobot);
     $("#deleteRobotButton").addEventListener("click", deleteRobot);
     $("#robotTemperature").addEventListener("input", renderTemperature);
+    $("#robotIgnoreShortInterjections").addEventListener("change", renderInterruptionEffects);
+    $("#robotInterjectionMaxSpeechMs").addEventListener("input", renderInterruptionEffects);
+    $("#robotDelayedInterruption").addEventListener("change", renderInterruptionEffects);
+    $("#robotInterruptionTailMs").addEventListener("input", renderInterruptionEffects);
     $("#openAssignmentModal").addEventListener("click", openAssignmentModal);
     $$('[data-open-assignment]').forEach((button) => button.addEventListener("click", openAssignmentModal));
     $$('[data-close-modal]').forEach((button) => button.addEventListener("click", closeAssignmentModal));
@@ -641,7 +645,12 @@ function renderRobotEditor() {
     $("#robotCallbackCondition").value = robot.callback_condition || "";
     $("#robotStopListCondition").value = robot.stop_list_condition || "";
     $("#robotAnsweringMachineCondition").value = robot.answering_machine_condition || "";
+    $("#robotIgnoreShortInterjections").checked = Boolean(robot.ignore_short_interjections);
+    $("#robotInterjectionMaxSpeechMs").value = robot.interjection_max_speech_ms ?? 650;
+    $("#robotDelayedInterruption").checked = Boolean(robot.delayed_interruption);
+    $("#robotInterruptionTailMs").value = robot.interruption_tail_ms ?? 250;
     renderTemperature();
+    renderInterruptionEffects();
     const key = $("#geminiKeyStatus");
     key.textContent = state.gemini?.configured
         ? "✓ Gemini API key настроен"
@@ -651,6 +660,17 @@ function renderRobotEditor() {
 
 function renderTemperature() {
     $("#temperatureValue").textContent = Number($("#robotTemperature").value || 0.3).toFixed(2);
+}
+
+function renderInterruptionEffects() {
+    const ignoreShort = $("#robotIgnoreShortInterjections").checked;
+    const delayed = $("#robotDelayedInterruption").checked;
+    const speechMs = Number($("#robotInterjectionMaxSpeechMs").value || 650);
+    const tailMs = Number($("#robotInterruptionTailMs").value || 250);
+    $("#robotInterjectionMaxSpeechMs").disabled = !ignoreShort;
+    $("#robotInterruptionTailMs").disabled = !delayed;
+    $("#interjectionSpeechValue").textContent = `${speechMs} мс`;
+    $("#interruptionTailValue").textContent = `${tailMs} мс`;
 }
 
 async function createRobot() {
@@ -672,6 +692,10 @@ async function createRobot() {
                 callback_condition: "",
                 stop_list_condition: "",
                 answering_machine_condition: "",
+                ignore_short_interjections: false,
+                interjection_max_speech_ms: 650,
+                delayed_interruption: false,
+                interruption_tail_ms: 250,
                 active: true,
             }),
         });
@@ -702,6 +726,10 @@ async function saveRobot(event) {
         callback_condition: $("#robotCallbackCondition").value,
         stop_list_condition: $("#robotStopListCondition").value,
         answering_machine_condition: $("#robotAnsweringMachineCondition").value,
+        ignore_short_interjections: $("#robotIgnoreShortInterjections").checked,
+        interjection_max_speech_ms: Number($("#robotInterjectionMaxSpeechMs").value),
+        delayed_interruption: $("#robotDelayedInterruption").checked,
+        interruption_tail_ms: Number($("#robotInterruptionTailMs").value),
         active: true,
     };
     if (!payload.name) {

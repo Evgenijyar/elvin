@@ -13,6 +13,11 @@ from fastapi import WebSocket
 from starlette.websockets import WebSocketDisconnect
 
 from elvin.media.audio import Pcm24To16Resampler, PlaybackEchoGuard
+from elvin.media.interruption import (
+    InterruptionAction,
+    InterruptionPolicy,
+    LocalInterruptionGate,
+)
 from elvin.media.runtime import PreparedVoiceCall
 
 logger = logging.getLogger("elvin.asterisk")
@@ -72,6 +77,14 @@ class AsteriskProtocol:
             message = command if not suffix else f"{command} {suffix}"
         async with self.send_lock:
             await self.websocket.send_text(message)
+        # chan_websocket documents FLUSH_MEDIA as also resetting its paused
+        # state. Mirror command semantics locally: otherwise a preceding
+        # MEDIA_XOFF can leave send_media waiting forever for an XON event
+        # that is no longer required after the flush.
+        if command == "PAUSE_MEDIA":
+            self.media_allowed.clear()
+        elif command in {"CONTINUE_MEDIA", "FLUSH_MEDIA"}:
+            self.media_allowed.set()
 
     async def send_media(
         self,
@@ -188,10 +201,23 @@ class AsteriskGeminiBridge:
         self._pending_turn_drain_task: asyncio.Task[None] | None = None
         self._pending_drain_active = False
         self._pending_drain_audio: bytes | None = None
+        self.interruption_policy = InterruptionPolicy.from_robot(call.robot)
+        self.interruption_gate = LocalInterruptionGate(self.interruption_policy)
 
     async def run(self) -> str:
         self.call.media_attached = True
         self.call.timeline.add("ASTERISK_WEBSOCKET_ATTACHED")
+        self.call.timeline.add(
+            "LOCAL_INTERRUPTION_POLICY",
+            ignore_short_interjections=(
+                self.interruption_policy.ignore_short_interjections
+            ),
+            interjection_max_speech_ms=(
+                self.interruption_policy.interjection_max_speech_ms
+            ),
+            delayed_interruption=self.interruption_policy.delayed_interruption,
+            interruption_tail_ms=self.interruption_policy.effective_tail_ms,
+        )
         input_task = asyncio.create_task(
             self._input_loop(), name=f"asterisk-input-{self.call.identity.call_id}"
         )
@@ -239,6 +265,7 @@ class AsteriskGeminiBridge:
                 if not task.done():
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            self.interruption_gate.reset()
             self.call.detector.set_bot_speaking(False)
             self.call.timeline.add("ASTERISK_BRIDGE_CLOSED", result=result)
 
@@ -308,84 +335,67 @@ class AsteriskGeminiBridge:
                     pcm,
                     echo_suppressed=echo_suppressed,
                 )
+                now = asyncio.get_running_loop().time()
 
                 if decision.speech_started:
-                    # A PCM remainder from a previous Gemini generation must
-                    # never be concatenated with the new response. This can
-                    # happen when the model emits less than one Asterisk
-                    # frame before the caller speaks again.
-                    self.resampler.reset()
-                    await self._discard_output_buffer()
-                    response_open_generation = getattr(
-                        self.call.gemini,
-                        "response_open_generation",
-                        None,
-                    )
-                    response_audio_active = (
+                    bot_playback_active = (
                         decision.interrupted_bot
                         or self.call.detector.bot_speaking
+                    )
+                    response_audio_active = (
+                        bot_playback_active
                         or self.call.gemini.bot_audio_active.is_set()
                     )
-                    # A queued turn may be waiting for the previous response
-                    # to finish. If that response starts speaking while the
-                    # caller is still talking, turn it into a real barge-in:
-                    # cancel the sender, flush the far end, and preserve the
-                    # caller's already buffered pre-roll.
-                    pending_prefix = b""
-                    if response_audio_active and self._pending_drain_active:
-                        await self._cancel_pending_drain()
-                    if response_audio_active:
-                        self._discard_pending_turns()
-                    if response_audio_active and self._pending_turn_audio is not None:
-                        pending_prefix = bytes(self._pending_turn_audio)
-                        self._pending_turn_audio = None
-
                     if (
-                        response_open_generation is not None
-                        and not response_audio_active
-                    ) or (
-                        self._pending_drain_active
-                        and not response_audio_active
-                    ) or (
-                        self._active_activity_started
-                        and not response_audio_active
+                        bot_playback_active
+                        and self.interruption_policy.enabled
                     ):
-                        # The model has not started speaking yet. Queue this
-                        # utterance instead of opening a competing activity;
-                        # otherwise Gemini can cancel both the pending old
-                        # response and this new one.
-                        self._pending_turn_audio = bytearray()
+                        self.interruption_gate.begin()
                         self.call.timeline.add(
-                            "PENDING_TURN_STARTED",
-                            waiting_for_generation=response_open_generation,
-                        )
-                    elif response_audio_active:
-                        cleared = self.call.gemini.clear_output_nowait()
-                        # Advance Gemini's generation before flushing Asterisk
-                        # so an output chunk that was already dequeued cannot
-                        # be sent after the barge-in boundary.
-                        await self.call.gemini.start_activity()
-                        await self.protocol.command("FLUSH_MEDIA")
-                        self.echo_guard.clear()
-                        self._last_output_submission_at = 0.0
-                        self.call.detector.set_bot_speaking(False)
-                        self._active_activity_started = True
-                        self.call.timeline.add(
-                            "BARGE_IN_FLUSH",
-                            cleared_gemini_packets=cleared,
-                            reason=(
-                                "bot_audio"
-                                if decision.interrupted_bot
-                                else "pending_response"
+                            "LOCAL_INTERRUPTION_CANDIDATE",
+                            interjection_filter=(
+                                self.interruption_policy.ignore_short_interjections
                             ),
+                            speech_threshold_ms=(
+                                self.interruption_policy.interjection_max_speech_ms
+                            ),
+                            tail_ms=self.interruption_policy.effective_tail_ms,
                         )
-                        if pending_prefix:
-                            await self._send_audio_to_gemini(pending_prefix)
                     else:
-                        await self.call.gemini.start_activity()
-                        self._active_activity_started = True
-                        if pending_prefix:
-                            await self._send_audio_to_gemini(pending_prefix)
+                        await self._start_caller_activity(
+                            decision=decision,
+                            response_audio_active=response_audio_active,
+                        )
+
+                if self.interruption_gate.active:
+                    gated = self.interruption_gate.observe(
+                        audio=decision.audio_to_gemini,
+                        speech_ms=decision.speech_ms,
+                        speech_ended=decision.speech_ended,
+                        now=now,
+                    )
+                    if gated.confirmed_now:
+                        self.call.timeline.add(
+                            "LOCAL_INTERRUPTION_CONFIRMED",
+                            speech_ms=round(gated.speech_ms, 1),
+                            buffered_bytes=gated.audio_bytes,
+                            tail_ms=self.interruption_policy.effective_tail_ms,
+                        )
+                    if gated.action == InterruptionAction.IGNORE:
+                        self.call.timeline.add(
+                            "LOCAL_INTERJECTION_IGNORED",
+                            speech_ms=round(gated.speech_ms, 1),
+                            buffered_bytes=gated.audio_bytes,
+                        )
+                    elif gated.action == InterruptionAction.COMMIT:
+                        await self._commit_local_interruption(
+                            gated.audio,
+                            speech_ms=gated.speech_ms,
+                            speech_ended=gated.speech_ended,
+                        )
+                    # Tentative audio is owned exclusively by the local gate.
+                    # It must never leak into Gemini before commit.
+                    continue
 
                 if decision.audio_to_gemini:
                     if self._pending_turn_audio is not None:
@@ -414,6 +424,112 @@ class AsteriskGeminiBridge:
                         self._active_activity_started = False
         except WebSocketDisconnect:
             return "caller_hangup"
+
+    async def _start_caller_activity(
+        self,
+        *,
+        decision: Any,
+        response_audio_active: bool,
+    ) -> None:
+        """Preserve the stable immediate/serialized activity behavior."""
+        # A PCM remainder from a previous Gemini generation must never be
+        # concatenated with the new response.
+        self.resampler.reset()
+        await self._discard_output_buffer()
+        response_open_generation = getattr(
+            self.call.gemini,
+            "response_open_generation",
+            None,
+        )
+        pending_prefix = b""
+        if response_audio_active and self._pending_drain_active:
+            await self._cancel_pending_drain()
+        if response_audio_active:
+            self._discard_pending_turns()
+        if response_audio_active and self._pending_turn_audio is not None:
+            pending_prefix = bytes(self._pending_turn_audio)
+            self._pending_turn_audio = None
+
+        if (
+            response_open_generation is not None and not response_audio_active
+        ) or (self._pending_drain_active and not response_audio_active) or (
+            self._active_activity_started and not response_audio_active
+        ):
+            self._pending_turn_audio = bytearray()
+            self.call.timeline.add(
+                "PENDING_TURN_STARTED",
+                waiting_for_generation=response_open_generation,
+            )
+        elif response_audio_active:
+            cleared = self.call.gemini.clear_output_nowait()
+            await self.call.gemini.start_activity()
+            await self.protocol.command("FLUSH_MEDIA")
+            self.echo_guard.clear()
+            self._last_output_submission_at = 0.0
+            self.call.detector.set_bot_speaking(False)
+            self._active_activity_started = True
+            self.call.timeline.add(
+                "BARGE_IN_FLUSH",
+                cleared_gemini_packets=cleared,
+                reason=(
+                    "bot_audio"
+                    if decision.interrupted_bot
+                    else "pending_response"
+                ),
+            )
+            if pending_prefix:
+                await self._send_audio_to_gemini(pending_prefix)
+        else:
+            await self.call.gemini.start_activity()
+            self._active_activity_started = True
+            if pending_prefix:
+                await self._send_audio_to_gemini(pending_prefix)
+
+    async def _commit_local_interruption(
+        self,
+        audio: bytes,
+        *,
+        speech_ms: float,
+        speech_ended: bool,
+    ) -> None:
+        """Commit buffered caller audio at the single barge-in boundary."""
+        if self._pending_drain_active:
+            await self._cancel_pending_drain()
+        self._discard_pending_turns()
+        pending_prefix = b""
+        if self._pending_turn_audio is not None:
+            pending_prefix = bytes(self._pending_turn_audio)
+            self._pending_turn_audio = None
+
+        self.resampler.reset()
+        await self._discard_output_buffer()
+        cleared = self.call.gemini.clear_output_nowait()
+        # Advance Gemini's generation before flushing Asterisk so a stale
+        # packet already dequeued by the output task cannot cross the boundary.
+        await self.call.gemini.start_activity()
+        await self.protocol.command("FLUSH_MEDIA")
+        self.echo_guard.clear()
+        self._last_output_submission_at = 0.0
+        self.call.detector.set_bot_speaking(False)
+        self._active_activity_started = True
+
+        if pending_prefix:
+            await self._send_audio_to_gemini(pending_prefix)
+        if audio:
+            await self._send_audio_to_gemini(audio)
+        if speech_ended:
+            await self.call.gemini.end_activity()
+            self._active_activity_started = False
+
+        self.call.timeline.add(
+            "BARGE_IN_FLUSH",
+            cleared_gemini_packets=cleared,
+            reason="local_interruption_policy",
+            speech_ms=round(speech_ms, 1),
+            buffered_bytes=len(audio),
+            speech_ended=speech_ended,
+            tail_ms=self.interruption_policy.effective_tail_ms,
+        )
 
     def _schedule_pending_turn_drain(self) -> None:
         task = self._pending_turn_drain_task

@@ -42,6 +42,10 @@ class RobotPayload(BaseModel):
     callback_condition: str = Field(default="", max_length=20_000)
     stop_list_condition: str = Field(default="", max_length=20_000)
     answering_machine_condition: str = Field(default="", max_length=20_000)
+    ignore_short_interjections: bool = False
+    interjection_max_speech_ms: int = Field(default=650, ge=100, le=2000)
+    delayed_interruption: bool = False
+    interruption_tail_ms: int = Field(default=250, ge=0, le=2000)
     active: bool = True
 
 

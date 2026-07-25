@@ -102,6 +102,7 @@
                                     <button type="button" class="editor-tab active" data-tab="role">Роль</button>
                                     <button type="button" class="editor-tab" data-tab="knowledge">База знаний</button>
                                     <button type="button" class="editor-tab" data-tab="stages">Стадии</button>
+                                    <button type="button" class="editor-tab" data-tab="effects">Эффекты</button>
                                     <button type="button" class="editor-tab" data-tab="settings">Настройки</button>
                                 </div>
 
@@ -128,6 +129,34 @@
                                         <label><span>Перезвонить</span><textarea id="robotCallbackCondition" rows="6" placeholder="Например: клиент попросил связаться в другое время"></textarea></label>
                                         <label><span>Стоп-лист</span><textarea id="robotStopListCondition" rows="6" placeholder="Например: клиент потребовал больше не звонить или проявил резкий негатив"></textarea></label>
                                         <label><span>Автоответчик</span><textarea id="robotAnsweringMachineCondition" rows="6" placeholder="Например: вместо человека отвечает автоответчик или голосовая почта"></textarea></label>
+                                    </div>
+                                </div>
+
+                                <div class="tab-pane" data-pane="effects">
+                                    <div class="interruption-effects">
+                                        <section class="effect-card">
+                                            <label class="effect-toggle">
+                                                <input id="robotIgnoreShortInterjections" type="checkbox">
+                                                <span>Игнорирование коротких реплик</span>
+                                            </label>
+                                            <p>Короткие «ага», «угу», «да-да» не прерывают робота и не отправляются в Gemini. Решение принимается локально по накопленному времени речи.</p>
+                                            <label class="effect-range">
+                                                <span>Порог голосовой активности: <b id="interjectionSpeechValue">650 мс</b></span>
+                                                <input id="robotInterjectionMaxSpeechMs" type="range" min="100" max="2000" step="50" value="650">
+                                            </label>
+                                        </section>
+
+                                        <section class="effect-card">
+                                            <label class="effect-toggle">
+                                                <input id="robotDelayedInterruption" type="checkbox">
+                                                <span>Отсрочка перебивания</span>
+                                            </label>
+                                            <p>После подтверждения полноценной реплики робот продолжает говорить заданное время и только затем освобождает линию для собеседника.</p>
+                                            <label class="effect-range">
+                                                <span>Длина речевого хвоста: <b id="interruptionTailValue">250 мс</b></span>
+                                                <input id="robotInterruptionTailMs" type="range" min="0" max="2000" step="50" value="250">
+                                            </label>
+                                        </section>
                                     </div>
                                 </div>
 

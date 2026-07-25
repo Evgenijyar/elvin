@@ -54,6 +54,7 @@ class TurnDecision:
     speech_ended: bool = False
     interrupted_bot: bool = False
     echo_suppressed: bool = False
+    speech_ms: float = 0.0
     vad_state: str = "QUIET"
     smart_turn_state: str | None = None
     levels: dict[str, float] | None = None
@@ -118,6 +119,8 @@ class LocalTurnDetector:
         self.turn_open = False
         self.bot_speaking = False
         self.turn_started_at: float | None = None
+        self.pre_turn_speech_ms = 0.0
+        self.turn_speech_ms = 0.0
         self.silence_started_at: float | None = None
         self.last_smart_turn_check = 0.0
         self.turn_complete_candidate_at: float | None = None
@@ -155,6 +158,16 @@ class LocalTurnDetector:
             analysis_pcm,
             is_speech=speech_likely,
         )
+        frame_duration_ms = (
+            len(analysis_pcm) / (2 * self.config.sample_rate) * 1000.0
+        )
+        if self.turn_open:
+            if speech_likely:
+                self.turn_speech_ms += frame_duration_ms
+        elif speech_likely:
+            self.pre_turn_speech_ms += frame_duration_ms
+        else:
+            self.pre_turn_speech_ms = 0.0
 
         decision = TurnDecision(
             frame_sequence=self.sequence,
@@ -175,6 +188,11 @@ class LocalTurnDetector:
         if not self.turn_open and vad_state == self.VADState.SPEAKING:
             self.turn_open = True
             self.turn_started_at = now
+            self.turn_speech_ms = max(
+                frame_duration_ms,
+                self.pre_turn_speech_ms,
+            )
+            self.pre_turn_speech_ms = 0.0
             self.silence_started_at = None
             self.turn_complete_candidate_at = None
             decision.speech_started = True
@@ -193,6 +211,8 @@ class LocalTurnDetector:
             # Once a turn is open, preserve the continuous segment, including
             # short quiet frames.  Do not gate each 20ms fragment by volume.
             decision.audio_to_gemini = analysis_pcm if echo_suppressed else pcm
+
+        decision.speech_ms = round(self.turn_speech_ms, 1)
 
         if self.turn_open:
             if vad_state in {
@@ -311,6 +331,7 @@ class LocalTurnDetector:
                 "forwarded": bool(decision.audio_to_gemini),
                 "speech_started": decision.speech_started,
                 "speech_ended": decision.speech_ended,
+                "speech_ms": decision.speech_ms,
                 "echo_suppressed": decision.echo_suppressed,
                 "smart_turn": decision.smart_turn_state,
             }
@@ -336,6 +357,8 @@ class LocalTurnDetector:
         )
         self.silence_started_at = None
         self.turn_started_at = None
+        self.pre_turn_speech_ms = 0.0
+        self.turn_speech_ms = 0.0
         self.last_smart_turn_check = 0.0
         self.turn_complete_candidate_at = None
 
