@@ -6,6 +6,7 @@ from elvin.media.asterisk_bridge import (
     AsteriskGeminiBridge,
     AsteriskMediaInfo,
     AsteriskProtocol,
+    PendingCallerTurn,
 )
 from elvin.media.background_audio import LoopingBackgroundAudio
 from elvin.media.interruption import InterruptionPolicy
@@ -201,10 +202,12 @@ def test_pending_turn_is_serialized_and_chunked() -> None:
     bridge.resampler = SimpleNamespace(reset=lambda: None)
     bridge._output_buffer = bytearray()
     bridge._output_buffer_lock = asyncio.Lock()
-    bridge._pending_turns = deque([b"x" * 3_000])
+    bridge._pending_turns = deque(
+        [PendingCallerTurn(audio=b"x" * 3_000, speech_ms=800)]
+    )
     bridge._closed = False
     bridge._pending_drain_active = False
-    bridge._pending_drain_audio = None
+    bridge._pending_drain_turn = None
 
     async def exercise() -> None:
         await bridge._drain_pending_turns()
@@ -215,6 +218,189 @@ def test_pending_turn_is_serialized_and_chunked() -> None:
     assert [len(chunk) for chunk in sent_to_gemini] == [1280, 1280, 440]
     assert bridge._pending_turns == deque()
     assert any(name == "PENDING_TURN_SENT" for name, _ in timeline.events)
+
+
+def test_pending_drain_coalesces_queue_before_opening_activity() -> None:
+    sent_to_gemini: list[bytes] = []
+    activity_calls: list[str] = []
+
+    class _FakeGemini:
+        response_open_generation = 7
+        generation = 7
+
+        async def wait_for_response_idle(self, *, timeout: float) -> None:
+            assert timeout == 12.0
+            self.response_open_generation = None
+
+        async def start_activity(self) -> None:
+            activity_calls.append("start")
+
+        async def send_audio(self, pcm: bytes) -> None:
+            sent_to_gemini.append(pcm)
+
+        async def end_activity(self) -> None:
+            activity_calls.append("end")
+
+    timeline = _FakeTimeline()
+    bridge = object.__new__(AsteriskGeminiBridge)
+    bridge.call = SimpleNamespace(
+        gemini=_FakeGemini(),
+        timeline=timeline,
+        detector=SimpleNamespace(
+            bot_speaking=False,
+            set_bot_speaking=lambda _value: None,
+        ),
+    )
+    bridge.protocol = SimpleNamespace(command=_async_noop)
+    bridge.echo_guard = SimpleNamespace(clear=lambda: None)
+    bridge.resampler = SimpleNamespace(reset=lambda: None)
+    bridge._output_buffer = bytearray()
+    bridge._output_buffer_lock = asyncio.Lock()
+    bridge._pending_turns = deque(
+        [
+            PendingCallerTurn(audio=b"a" * 1_000, speech_ms=300),
+            PendingCallerTurn(audio=b"b" * 1_000, speech_ms=400),
+        ]
+    )
+    bridge._closed = False
+    bridge._pending_drain_active = False
+    bridge._pending_drain_turn = None
+
+    asyncio.run(bridge._drain_pending_turns())
+
+    assert activity_calls == ["start", "end"]
+    assert b"".join(sent_to_gemini) == b"a" * 1_000 + b"b" * 1_000
+    assert sum(
+        name == "PENDING_TURN_SENT" for name, _payload in timeline.events
+    ) == 1
+    assert any(
+        name == "PENDING_TURNS_COALESCED"
+        and payload["segments"] == 2
+        for name, payload in timeline.events
+    )
+
+
+def test_pending_turn_promotes_on_first_model_audio() -> None:
+    activity_calls: list[str] = []
+    commands: list[str] = []
+    sent_audio: list[bytes] = []
+
+    class _FakeGemini:
+        generation = 8
+
+        def clear_output_nowait(self) -> int:
+            return 2
+
+        async def start_activity(self) -> None:
+            activity_calls.append("start")
+            self.generation += 1
+
+        async def send_audio(self, pcm: bytes) -> None:
+            sent_audio.append(pcm)
+
+        async def end_activity(self) -> None:
+            activity_calls.append("end")
+
+    async def command(name: str) -> None:
+        commands.append(name)
+
+    timeline = _FakeTimeline()
+    bridge = object.__new__(AsteriskGeminiBridge)
+    bridge.call = SimpleNamespace(
+        gemini=_FakeGemini(),
+        timeline=timeline,
+        detector=SimpleNamespace(set_bot_speaking=lambda _value: None),
+    )
+    bridge.protocol = SimpleNamespace(command=command)
+    bridge.echo_guard = SimpleNamespace(clear=lambda: None)
+    bridge.resampler = SimpleNamespace(reset=lambda: None)
+    bridge._output_buffer = bytearray()
+    bridge._output_buffer_lock = asyncio.Lock()
+    bridge._pending_turns = deque(
+        [PendingCallerTurn(audio=b"x" * 2_000, speech_ms=800)]
+    )
+    bridge._pending_turn_audio = None
+    bridge._pending_turn_speech_ms = 0.0
+    bridge._pending_drain_active = False
+    bridge._pending_turn_drain_task = None
+    bridge._last_output_submission_at = 1.0
+    bridge._active_activity_started = False
+    bridge.interruption_policy = InterruptionPolicy()
+
+    async def exercise() -> bool:
+        return await bridge._promote_pending_turn_on_model_audio()
+
+    assert asyncio.run(exercise())
+    assert activity_calls == ["start", "end"]
+    assert commands == ["FLUSH_MEDIA"]
+    assert [len(chunk) for chunk in sent_audio] == [1280, 720]
+    assert bridge._pending_turns == deque()
+    assert any(
+        name == "PENDING_TURN_PROMOTED"
+        and payload["segments"] == 1
+        for name, payload in timeline.events
+    )
+    assert any(
+        name == "BARGE_IN_FLUSH"
+        and payload["reason"] == "pending_turn_promoted"
+        for name, payload in timeline.events
+    )
+
+
+def test_multiple_pending_turns_are_coalesced_in_chronological_order() -> None:
+    bridge = object.__new__(AsteriskGeminiBridge)
+    bridge._pending_turns = deque(
+        [
+            PendingCallerTurn(audio=b"first", speech_ms=300),
+            PendingCallerTurn(audio=b"second", speech_ms=500),
+        ]
+    )
+    bridge._pending_turn_audio = bytearray(b"active")
+    bridge._pending_turn_speech_ms = 700
+    bridge._pending_drain_active = False
+
+    async def exercise() -> PendingCallerTurn | None:
+        return await bridge._take_pending_caller_turn()
+
+    pending = asyncio.run(exercise())
+
+    assert pending is not None
+    assert pending.audio == b"firstsecondactive"
+    assert pending.speech_ms == 700
+    assert not pending.speech_ended
+    assert pending.segments == 3
+    assert bridge._pending_turns == deque()
+    assert bridge._pending_turn_audio is None
+
+
+def test_short_pending_interjection_does_not_cancel_model_audio() -> None:
+    timeline = _FakeTimeline()
+    policy = InterruptionPolicy(
+        ignore_short_interjections=True,
+        interjection_max_speech_ms=650,
+    )
+    bridge = object.__new__(AsteriskGeminiBridge)
+    bridge.call = SimpleNamespace(timeline=timeline)
+    bridge._pending_turns = deque(
+        [PendingCallerTurn(audio=b"short", speech_ms=240)]
+    )
+    bridge._pending_turn_audio = None
+    bridge._pending_turn_speech_ms = 0.0
+    bridge._pending_drain_active = False
+    bridge._pending_turn_drain_task = None
+    bridge.interruption_policy = policy
+    bridge.interruption_gate = LocalInterruptionGate(policy)
+
+    async def exercise() -> bool:
+        return await bridge._promote_pending_turn_on_model_audio()
+
+    assert not asyncio.run(exercise())
+    assert bridge._pending_turns == deque()
+    assert any(
+        name == "LOCAL_INTERJECTION_IGNORED"
+        and payload["origin"] == "pending_turn"
+        for name, payload in timeline.events
+    )
 
 
 def test_committed_local_interruption_uses_single_flush_boundary() -> None:

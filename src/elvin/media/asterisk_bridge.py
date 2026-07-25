@@ -32,6 +32,14 @@ class AsteriskMediaInfo:
     channel: str = ""
 
 
+@dataclass(slots=True)
+class PendingCallerTurn:
+    audio: bytes
+    speech_ms: float
+    speech_ended: bool = True
+    segments: int = 1
+
+
 class AsteriskProtocol:
     def __init__(self, websocket: WebSocket, call: PreparedVoiceCall) -> None:
         self.websocket = websocket
@@ -197,10 +205,11 @@ class AsteriskGeminiBridge:
         # Keep the completed caller utterance here and submit it only after
         # the current server turn is complete.
         self._pending_turn_audio: bytearray | None = None
-        self._pending_turns: deque[bytes] = deque()
+        self._pending_turn_speech_ms = 0.0
+        self._pending_turns: deque[PendingCallerTurn] = deque()
         self._pending_turn_drain_task: asyncio.Task[None] | None = None
         self._pending_drain_active = False
-        self._pending_drain_audio: bytes | None = None
+        self._pending_drain_turn: PendingCallerTurn | None = None
         self.interruption_policy = InterruptionPolicy.from_robot(call.robot)
         self.interruption_gate = LocalInterruptionGate(self.interruption_policy)
 
@@ -402,6 +411,10 @@ class AsteriskGeminiBridge:
                         self._pending_turn_audio.extend(
                             decision.audio_to_gemini
                         )
+                        self._pending_turn_speech_ms = max(
+                            self._pending_turn_speech_ms,
+                            decision.speech_ms,
+                        )
                     elif self._active_activity_started:
                         await self._send_audio_to_gemini(
                             decision.audio_to_gemini
@@ -411,8 +424,15 @@ class AsteriskGeminiBridge:
                     if self._pending_turn_audio is not None:
                         pending_audio = bytes(self._pending_turn_audio)
                         self._pending_turn_audio = None
+                        pending_speech_ms = self._pending_turn_speech_ms
+                        self._pending_turn_speech_ms = 0.0
                         if pending_audio:
-                            self._pending_turns.append(pending_audio)
+                            self._pending_turns.append(
+                                PendingCallerTurn(
+                                    audio=pending_audio,
+                                    speech_ms=pending_speech_ms,
+                                )
+                            )
                             self.call.timeline.add(
                                 "PENDING_TURN_QUEUED",
                                 bytes=len(pending_audio),
@@ -449,6 +469,7 @@ class AsteriskGeminiBridge:
         if response_audio_active and self._pending_turn_audio is not None:
             pending_prefix = bytes(self._pending_turn_audio)
             self._pending_turn_audio = None
+            self._pending_turn_speech_ms = 0.0
 
         if (
             response_open_generation is not None and not response_audio_active
@@ -456,6 +477,7 @@ class AsteriskGeminiBridge:
             self._active_activity_started and not response_audio_active
         ):
             self._pending_turn_audio = bytearray()
+            self._pending_turn_speech_ms = 0.0
             self.call.timeline.add(
                 "PENDING_TURN_STARTED",
                 waiting_for_generation=response_open_generation,
@@ -491,6 +513,7 @@ class AsteriskGeminiBridge:
         *,
         speech_ms: float,
         speech_ended: bool,
+        reason: str = "local_interruption_policy",
     ) -> None:
         """Commit buffered caller audio at the single barge-in boundary."""
         if self._pending_drain_active:
@@ -500,6 +523,7 @@ class AsteriskGeminiBridge:
         if self._pending_turn_audio is not None:
             pending_prefix = bytes(self._pending_turn_audio)
             self._pending_turn_audio = None
+            self._pending_turn_speech_ms = 0.0
 
         self.resampler.reset()
         await self._discard_output_buffer()
@@ -524,7 +548,7 @@ class AsteriskGeminiBridge:
         self.call.timeline.add(
             "BARGE_IN_FLUSH",
             cleared_gemini_packets=cleared,
-            reason="local_interruption_policy",
+            reason=reason,
             speech_ms=round(speech_ms, 1),
             buffered_bytes=len(audio),
             speech_ended=speech_ended,
@@ -558,6 +582,108 @@ class AsteriskGeminiBridge:
                 reason="caller_barge_in",
             )
 
+    async def _take_pending_caller_turn(self) -> PendingCallerTurn | None:
+        """Atomically transfer all pending caller input to one Gemini turn."""
+        if self._pending_drain_active:
+            await self._cancel_pending_drain()
+
+        turns = list(self._pending_turns)
+        self._pending_turns.clear()
+        if self._pending_turn_audio is not None:
+            audio = bytes(self._pending_turn_audio)
+            self._pending_turn_audio = None
+            turns.append(
+                PendingCallerTurn(
+                    audio=audio,
+                    speech_ms=self._pending_turn_speech_ms,
+                    speech_ended=False,
+                )
+            )
+            self._pending_turn_speech_ms = 0.0
+        if not turns:
+            return None
+
+        return self._coalesce_pending_turns(turns)
+
+    @staticmethod
+    def _coalesce_pending_turns(
+        turns: list[PendingCallerTurn],
+    ) -> PendingCallerTurn:
+        return PendingCallerTurn(
+            audio=b"".join(turn.audio for turn in turns),
+            # Several short listener acknowledgements must not accidentally
+            # become a full interruption merely because they were queued.
+            speech_ms=max(turn.speech_ms for turn in turns),
+            speech_ended=all(turn.speech_ended for turn in turns),
+            segments=sum(turn.segments for turn in turns),
+        )
+
+    async def _promote_pending_turn_on_model_audio(self) -> bool:
+        """Make caller input supersede a response as soon as it becomes audible.
+
+        Returns True when the current model packet became stale and must not be
+        sent to Asterisk.
+        """
+        if (
+            self._pending_turn_audio is None
+            and not self._pending_turns
+            and not self._pending_drain_active
+        ):
+            return False
+
+        pending = await self._take_pending_caller_turn()
+        if pending is None or not pending.audio:
+            return False
+        self.call.timeline.add(
+            "PENDING_TURN_PROMOTED",
+            bytes=len(pending.audio),
+            speech_ms=round(pending.speech_ms, 1),
+            speech_ended=pending.speech_ended,
+            segments=pending.segments,
+        )
+
+        if not self.interruption_policy.enabled:
+            await self._commit_local_interruption(
+                pending.audio,
+                speech_ms=pending.speech_ms,
+                speech_ended=pending.speech_ended,
+                reason="pending_turn_promoted",
+            )
+            return True
+
+        self.interruption_gate.begin()
+        gated = self.interruption_gate.observe(
+            audio=pending.audio,
+            speech_ms=pending.speech_ms,
+            speech_ended=pending.speech_ended,
+            now=asyncio.get_running_loop().time(),
+        )
+        if gated.confirmed_now:
+            self.call.timeline.add(
+                "LOCAL_INTERRUPTION_CONFIRMED",
+                speech_ms=round(gated.speech_ms, 1),
+                buffered_bytes=gated.audio_bytes,
+                tail_ms=self.interruption_policy.effective_tail_ms,
+                origin="pending_turn",
+            )
+        if gated.action == InterruptionAction.IGNORE:
+            self.call.timeline.add(
+                "LOCAL_INTERJECTION_IGNORED",
+                speech_ms=round(gated.speech_ms, 1),
+                buffered_bytes=gated.audio_bytes,
+                origin="pending_turn",
+            )
+            return False
+        if gated.action == InterruptionAction.COMMIT:
+            await self._commit_local_interruption(
+                gated.audio,
+                speech_ms=gated.speech_ms,
+                speech_ended=gated.speech_ended,
+                reason="pending_turn_promoted",
+            )
+            return True
+        return False
+
     async def _send_audio_to_gemini(self, pcm16: bytes) -> None:
         """Send input in 20–40 ms chunks, including buffered pre-roll."""
         if not pcm16:
@@ -571,9 +697,10 @@ class AsteriskGeminiBridge:
 
     async def _drain_pending_turns(self) -> None:
         while self._pending_turns and not self._closed:
-            pending_audio = self._pending_turns.popleft()
+            pending_turn = self._pending_turns.popleft()
+            pending_audio = pending_turn.audio
             self._pending_drain_active = True
-            self._pending_drain_audio = pending_audio
+            self._pending_drain_turn = pending_turn
             sent = False
             activity_started = False
             try:
@@ -600,6 +727,17 @@ class AsteriskGeminiBridge:
                     and asyncio.get_running_loop().time() < deadline
                 ):
                     await asyncio.sleep(0.02)
+                if self._pending_turns:
+                    queued = [pending_turn, *self._pending_turns]
+                    self._pending_turns.clear()
+                    pending_turn = self._coalesce_pending_turns(queued)
+                    pending_audio = pending_turn.audio
+                    self._pending_drain_turn = pending_turn
+                    self.call.timeline.add(
+                        "PENDING_TURNS_COALESCED",
+                        segments=pending_turn.segments,
+                        bytes=len(pending_audio),
+                    )
                 if self.call.detector.bot_speaking:
                     cleared = self.call.gemini.clear_output_nowait()
                     await self.protocol.command("FLUSH_MEDIA")
@@ -621,10 +759,11 @@ class AsteriskGeminiBridge:
                     "PENDING_TURN_SENT",
                     bytes=len(pending_audio),
                     remaining=len(self._pending_turns),
+                    segments=pending_turn.segments,
                 )
             except asyncio.CancelledError:
                 if not sent:
-                    self._pending_turns.appendleft(pending_audio)
+                    self._pending_turns.appendleft(pending_turn)
                 if activity_started:
                     try:
                         await asyncio.shield(self.call.gemini.end_activity())
@@ -636,7 +775,7 @@ class AsteriskGeminiBridge:
                 raise
             except Exception as exc:
                 if not sent:
-                    self._pending_turns.appendleft(pending_audio)
+                    self._pending_turns.appendleft(pending_turn)
                 if activity_started:
                     try:
                         await self.call.gemini.end_activity()
@@ -652,7 +791,7 @@ class AsteriskGeminiBridge:
                 )
                 await asyncio.sleep(0.25)
             finally:
-                self._pending_drain_audio = None
+                self._pending_drain_turn = None
                 self._pending_drain_active = False
 
     async def _output_loop(self) -> None:
@@ -684,6 +823,8 @@ class AsteriskGeminiBridge:
                 # Once a new user activity starts, old queued model audio must
                 # not leak into the next turn even if it races with the server.
                 if packet.generation != self.call.gemini.generation:
+                    continue
+                if await self._promote_pending_turn_on_model_audio():
                     continue
                 pcm16 = self.resampler.convert(packet.pcm24)
                 if not pcm16:
