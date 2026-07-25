@@ -12,7 +12,6 @@ import asyncpg
 from asyncpg import Pool
 
 from elvin.config import Settings
-from elvin.services.conversation_effects import normalize_effects_config
 
 
 DEFAULT_STATE: dict[str, Any] = {
@@ -31,7 +30,6 @@ ROBOT_DEFAULTS: dict[str, Any] = {
     "callback_condition": "",
     "stop_list_condition": "",
     "answering_machine_condition": "",
-    "effects_config": normalize_effects_config({}),
 }
 
 ASSIGNMENT_DEFAULTS: dict[str, Any] = {
@@ -154,7 +152,6 @@ class StateStore:
                     role_prompt TEXT NOT NULL DEFAULT '',
                     knowledge_base TEXT NOT NULL DEFAULT '',
                     first_phrase TEXT NOT NULL DEFAULT '',
-                    effects_config JSONB NOT NULL DEFAULT '{}'::jsonb,
                     active BOOLEAN NOT NULL DEFAULT TRUE,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -199,7 +196,6 @@ class StateStore:
                 "ALTER TABLE app.robot_profiles ADD COLUMN IF NOT EXISTS callback_condition TEXT NOT NULL DEFAULT ''",
                 "ALTER TABLE app.robot_profiles ADD COLUMN IF NOT EXISTS stop_list_condition TEXT NOT NULL DEFAULT ''",
                 "ALTER TABLE app.robot_profiles ADD COLUMN IF NOT EXISTS answering_machine_condition TEXT NOT NULL DEFAULT ''",
-                "ALTER TABLE app.robot_profiles ADD COLUMN IF NOT EXISTS effects_config JSONB NOT NULL DEFAULT '{}'::jsonb",
                 "ALTER TABLE app.project_robot_assignments ADD COLUMN IF NOT EXISTS lead_stage_id BIGINT",
                 "ALTER TABLE app.project_robot_assignments ADD COLUMN IF NOT EXISTS lead_stage_name TEXT NOT NULL DEFAULT ''",
                 "ALTER TABLE app.project_robot_assignments ADD COLUMN IF NOT EXISTS special_stage_id BIGINT",
@@ -355,7 +351,7 @@ class StateStore:
                        first_phrase, lead_condition, special_condition,
                        refusal_condition, callback_condition,
                        stop_list_condition, answering_machine_condition,
-                       effects_config, active, created_at, updated_at
+                       active, created_at, updated_at
                 FROM app.robot_profiles
                 ORDER BY updated_at DESC, name ASC
                 """
@@ -367,7 +363,6 @@ class StateStore:
             item = deepcopy(stored)
             for key, default in ROBOT_DEFAULTS.items():
                 item.setdefault(key, deepcopy(default))
-            item["effects_config"] = normalize_effects_config(item.get("effects_config"))
             robots.append(item)
         return sorted(
             robots,
@@ -403,7 +398,6 @@ class StateStore:
             "answering_machine_condition": payload.get(
                 "answering_machine_condition", ""
             ),
-            "effects_config": normalize_effects_config(payload.get("effects_config")),
             "active": bool(payload.get("active", True)),
             "created_at": now,
             "updated_at": now,
@@ -416,18 +410,17 @@ class StateStore:
                     temperature, role_prompt, knowledge_base,
                     first_phrase, lead_condition, special_condition,
                     refusal_condition, callback_condition,
-                    stop_list_condition, answering_machine_condition,
-                    effects_config, active
+                    stop_list_condition, answering_machine_condition, active
                 ) VALUES(
                     $1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                    $11, $12, $13, $14, $15, $16::jsonb, $17
+                    $11, $12, $13, $14, $15, $16
                 )
                 RETURNING id, name, description, model_id, voice_name,
                           temperature, role_prompt, knowledge_base,
                           first_phrase, lead_condition, special_condition,
                           refusal_condition, callback_condition,
                           stop_list_condition, answering_machine_condition,
-                          effects_config, active, created_at, updated_at
+                          active, created_at, updated_at
                 """,
                 robot_id,
                 item["name"],
@@ -444,7 +437,6 @@ class StateStore:
                 item["callback_condition"],
                 item["stop_list_condition"],
                 item["answering_machine_condition"],
-                json.dumps(item["effects_config"], ensure_ascii=False),
                 item["active"],
             )
             return self._robot_row(row)
@@ -468,14 +460,14 @@ class StateStore:
                     first_phrase=$9, lead_condition=$10, special_condition=$11,
                     refusal_condition=$12, callback_condition=$13,
                     stop_list_condition=$14, answering_machine_condition=$15,
-                    effects_config=$16::jsonb, active=$17, updated_at=NOW()
+                    active=$16, updated_at=NOW()
                 WHERE id=$1::uuid
                 RETURNING id, name, description, model_id, voice_name,
                           temperature, role_prompt, knowledge_base,
                           first_phrase, lead_condition, special_condition,
                           refusal_condition, callback_condition,
                           stop_list_condition, answering_machine_condition,
-                          effects_config, active, created_at, updated_at
+                          active, created_at, updated_at
                 """,
                 robot_id,
                 payload["name"],
@@ -492,7 +484,6 @@ class StateStore:
                 payload.get("callback_condition", ""),
                 payload.get("stop_list_condition", ""),
                 payload.get("answering_machine_condition", ""),
-                json.dumps(normalize_effects_config(payload.get("effects_config")), ensure_ascii=False),
                 bool(payload.get("active", True)),
             )
             return self._robot_row(row) if row else None
@@ -525,7 +516,6 @@ class StateStore:
                     "answering_machine_condition": payload.get(
                         "answering_machine_condition", ""
                     ),
-                    "effects_config": normalize_effects_config(payload.get("effects_config")),
                     "active": bool(payload.get("active", True)),
                     "updated_at": datetime.now(UTC).isoformat(),
                 }
@@ -1161,7 +1151,6 @@ class StateStore:
         item["updated_at"] = item["updated_at"].isoformat()
         for key, default in ROBOT_DEFAULTS.items():
             item.setdefault(key, deepcopy(default))
-        item["effects_config"] = normalize_effects_config(item.get("effects_config"))
         return item
 
     def _call_batch_row(self, row: asyncpg.Record) -> dict[str, Any]:

@@ -8,18 +8,11 @@ from pathlib import Path
 from typing import Any
 
 from elvin.integrations.gemini_live import GeminiLiveSession
-from elvin.integrations.gemini_director import GeminiDirectorSession
 from elvin.media.audio import AsyncWaveWriter, TELEPHONY_SAMPLE_RATE
 from elvin.media.background_audio import LoopingBackgroundAudio
-from elvin.media.conversation_audio import ConversationAudioEffects
 from elvin.media.turn_detector import LocalTurnDetector, TurnDetectorConfig
 from elvin.observability.frame_trace import FrameTraceWriter
 from elvin.observability.timeline import CallTimeline
-from elvin.services.conversation_effects import (
-    director_required,
-    enabled_effect_keys,
-    normalize_effects_config,
-)
 
 logger = logging.getLogger("elvin.voice_runtime")
 
@@ -45,8 +38,7 @@ class PreparedVoiceCall:
         *,
         identity: VoiceCallIdentity,
         robot: dict[str, Any],
-        actor_api_key: str,
-        director_api_key: str,
+        api_key: str,
         recordings_dir: Path,
         trace_enabled: bool,
         turn_config: TurnDetectorConfig,
@@ -74,25 +66,11 @@ class PreparedVoiceCall:
             timeline=self.timeline,
             frame_trace=self.frame_trace,
         )
-        self.effects_config = normalize_effects_config(robot.get("effects_config"))
-        self.audio_effects = ConversationAudioEffects(self.effects_config)
         self.gemini = GeminiLiveSession(
-            api_key=actor_api_key,
+            api_key=api_key,
             robot=robot,
             timeline=self.timeline,
         )
-        self.director: GeminiDirectorSession | None = None
-        if director_required(self.effects_config):
-            if not director_api_key:
-                raise RuntimeError(
-                    "Gemini API key «Режиссёр» не настроен, но у робота включены эффекты."
-                )
-            self.director = GeminiDirectorSession(
-                api_key=director_api_key,
-                robot=robot,
-                effects_config=self.effects_config,
-                timeline=self.timeline,
-            )
         self.background_audio_path = background_audio_path
         self.background_audio_volume = max(0, min(int(background_audio_volume), 100))
         self.background_audio: LoopingBackgroundAudio | None = None
@@ -108,8 +86,6 @@ class PreparedVoiceCall:
             "VOICE_SESSION_PREPARING",
             lead_id=self.identity.lead_id,
             robot_id=self.identity.robot_id,
-            effects=enabled_effect_keys(self.effects_config),
-            director_required=self.director is not None,
         )
         self.background_audio = await LoopingBackgroundAudio.load(
             self.background_audio_path,
@@ -122,8 +98,6 @@ class PreparedVoiceCall:
             )
         try:
             await self.gemini.connect()
-            if self.director is not None:
-                await self.director.connect()
         except Exception:
             await self.close()
             raise
@@ -134,8 +108,6 @@ class PreparedVoiceCall:
             return
         self._closed = True
         try:
-            if self.director is not None:
-                await self.director.close()
             await self.gemini.close()
         finally:
             await self.detector.close()
@@ -168,16 +140,14 @@ class VoiceRuntime:
         *,
         identity: VoiceCallIdentity,
         robot: dict[str, Any],
-        actor_api_key: str,
-        director_api_key: str = "",
+        api_key: str,
         background_audio_path: Path | None = None,
         background_audio_volume: int = 0,
     ) -> PreparedVoiceCall:
         call = PreparedVoiceCall(
             identity=identity,
             robot=robot,
-            actor_api_key=actor_api_key,
-            director_api_key=director_api_key,
+            api_key=api_key,
             recordings_dir=self.recordings_dir,
             trace_enabled=self.trace_enabled,
             turn_config=self.turn_config,
@@ -201,5 +171,6 @@ def preload_voice_runtime() -> None:
     turn = LocalSmartTurnAnalyzerV3(sample_rate=16_000)
     turn.set_sample_rate(16_000)
     logger.warning(
-        "Pipecat voice runtime preloaded: Silero VAD + Smart Turn v3 + pipecat-asterisk"
+        "Pipecat voice runtime preloaded: Silero VAD + Smart Turn v3 + "
+        "pipecat-asterisk"
     )

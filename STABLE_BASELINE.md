@@ -1,59 +1,41 @@
-# Неприкосновенные стабильные точки Elvin
+# Неприкосновенная стабильная точка Elvin
 
-## Основная точка отката перед Actor/Director
-
-Текущая проверенная production-сборка со стадиями, outcome tools, лимитами и
-фоновым аудио:
-
-- тег Git: `v1.1.0-stable`;
-- commit: `3eaef60099bfef96f4feb0a666bc3698935e92f1`.
-
-Этот тег является основной точкой отката для разработки Gemini Director и
-разговорных эффектов. Он не перемещается и не изменяется.
-
-## Предыдущая стабильная точка
-
-Проверенная сборка до стадий, лимитов и фонового аудио:
+Проверенная production-сборка до разработки стадий, лимитов и фонового аудио:
 
 - тег Git: `v1.0.0-stable`;
 - commit: `55c1b469b47cfc38e07684e6715804872270c4ef`;
-- Docker-образ: `elvin-backend:55c1b469b47c`.
+- Docker-образ: `elvin-backend:55c1b469b47c`;
+- на момент фиксации ветки `main` и `production` указывали на этот commit.
 
-Тег `v1.0.0-stable` также не перемещается и не изменяется.
+Тег `v1.0.0-stable` в этой разработке не перемещается и не изменяется.
 
-## Проверка тегов
+## Проверка точки отката
 
 ```bash
-git rev-parse v1.1.0-stable^{commit}
+git show --no-patch --decorate v1.0.0-stable
 git rev-parse v1.0.0-stable^{commit}
 ```
 
-Ожидаемые commits:
+Ожидаемый commit:
 
 ```text
-3eaef60099bfef96f4feb0a666bc3698935e92f1
 55c1b469b47cfc38e07684e6715804872270c4ef
 ```
 
-## Откат к версии 1.1.0
-
-```bash
-git fetch --tags origin
-git checkout main
-git reset --hard v1.1.0-stable
-git push --force-with-lease origin main
-elvin-deploy
-```
-
-Новая колонка `effects_config` и сохранённый ключ Режиссёра могут остаться в
-PostgreSQL: версия 1.1.0 их не использует.
-
-## Откат к версии 1.0.0
+## Откат Git при необходимости
 
 ```bash
 git fetch --tags origin
 git checkout main
 git reset --hard v1.0.0-stable
 git push --force-with-lease origin main
+```
+
+После этого выполняется обычный серверный деплой:
+
+```bash
 elvin-deploy
 ```
+
+При необходимости можно повторно запустить сохранённый Docker-образ
+`elvin-backend:55c1b469b47c` согласно действующей серверной схеме Elvin.
