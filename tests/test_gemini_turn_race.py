@@ -165,3 +165,25 @@ def test_outcome_tool_call_is_acknowledged_and_saved(monkeypatch) -> None:
         "accepted": True,
         "outcome": "special",
     }
+
+
+def test_conversation_transcript_orders_caller_and_elvin_turns() -> None:
+    session = object.__new__(GeminiLiveSession)
+    session._input_transcripts = {
+        2: "  Второй   вопрос ",
+        1: "Первый вопрос",
+        3: "",
+    }
+    session._output_transcripts = {
+        1: " Первый ответ ",
+        2: "Второй ответ",
+        3: "Финальная реплика",
+    }
+
+    assert session.conversation_transcript() == (
+        "Клиент: Первый вопрос\n\n"
+        "Элвин: Первый ответ\n\n"
+        "Клиент: Второй вопрос\n\n"
+        "Элвин: Второй ответ\n\n"
+        "Элвин: Финальная реплика"
+    )

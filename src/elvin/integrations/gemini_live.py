@@ -115,6 +115,25 @@ class GeminiLiveSession:
     def generation(self) -> int:
         return self._generation
 
+    def conversation_transcript(self) -> str:
+        """Return the ordered caller/Elvin transcript accumulated by Live API."""
+        lines: list[str] = []
+        generations = sorted(
+            set(self._input_transcripts) | set(self._output_transcripts)
+        )
+        for generation in generations:
+            caller = " ".join(
+                str(self._input_transcripts.get(generation) or "").split()
+            )
+            elvin = " ".join(
+                str(self._output_transcripts.get(generation) or "").split()
+            )
+            if caller:
+                lines.append(f"Клиент: {caller}")
+            if elvin:
+                lines.append(f"Элвин: {elvin}")
+        return "\n\n".join(lines).strip()
+
     @property
     def response_open_generation(self) -> int | None:
         """Generation whose server response has not completed yet.

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Awaitable, Callable
 
 from elvin.config import Settings
@@ -275,6 +276,7 @@ class CallQueueManager:
                 if item is None:
                     break
                 context: MediaCallContext | None = None
+                voice_call: PreparedVoiceCall | None = None
                 media_started = asyncio.Event()
                 completed = asyncio.Event()
                 self._media_started_events[batch_id] = media_started
@@ -326,6 +328,9 @@ class CallQueueManager:
                     voice_call.timeline.add("LPTRACKER_CALL_REQUEST")
                     await self.lptracker.call_lead(token, context.lead_id)
                     voice_call.timeline.add("LPTRACKER_CALL_ACCEPTED")
+                    await self.store.update_call_item(
+                        item["id"], call_started_at=datetime.now(UTC)
+                    )
                     await self.store.increment_call_batch(batch_id, calls_made=1)
                     await self.store.update_call_item(
                         item["id"], status="WAITING_FOR_MEDIA"
@@ -340,8 +345,9 @@ class CallQueueManager:
                         self.media_connect_timeout_seconds,
                     )
                     if wait_result == "stopped":
-                        await self.store.update_call_item(
+                        await self._finish_call_item(
                             item["id"],
+                            voice_call,
                             status="STOPPED",
                             result="stopped_by_user",
                         )
@@ -354,8 +360,9 @@ class CallQueueManager:
                             outcome=NO_ANSWER_KEY,
                             voice_call=voice_call,
                         )
-                        await self.store.update_call_item(
+                        await self._finish_call_item(
                             item["id"],
+                            voice_call,
                             status="COMPLETED",
                             result="no_answer",
                         )
@@ -379,8 +386,9 @@ class CallQueueManager:
                                 outcome=outcome,
                                 voice_call=voice_call,
                             )
-                        await self.store.update_call_item(
+                        await self._finish_call_item(
                             item["id"],
+                            voice_call,
                             status="FAILED" if failed else "COMPLETED",
                             result=result,
                             error_message=result if failed else move_error,
@@ -391,8 +399,9 @@ class CallQueueManager:
                         )
                     elif call_result == "stopped":
                         await self._terminate_media(batch_id)
-                        await self.store.update_call_item(
+                        await self._finish_call_item(
                             item["id"],
+                            voice_call,
                             status="STOPPED",
                             result="stopped_by_user",
                         )
@@ -408,8 +417,9 @@ class CallQueueManager:
                                 outcome=outcome,
                                 voice_call=voice_call,
                             )
-                        await self.store.update_call_item(
+                        await self._finish_call_item(
                             item["id"],
+                            voice_call,
                             status="CALL_TIMEOUT",
                             error_message=(
                                 "Превышена максимальная длительность звонка."
@@ -422,8 +432,9 @@ class CallQueueManager:
                         batch_id,
                         item.get("lead_id"),
                     )
-                    await self.store.update_call_item(
+                    await self._finish_call_item(
                         item["id"],
+                        voice_call,
                         status="FAILED",
                         error_message=f"{type(exc).__name__}: {exc}"[:1000],
                     )
@@ -467,6 +478,33 @@ class CallQueueManager:
                 self._tasks.pop(batch_id, None)
                 self._stop_events.pop(batch_id, None)
                 self._clear_item_events(batch_id)
+
+    async def _finish_call_item(
+        self,
+        item_id: str,
+        voice_call: PreparedVoiceCall | None,
+        **fields: Any,
+    ) -> None:
+        transcript = ""
+        if voice_call is not None:
+            transcript = voice_call.gemini.conversation_transcript()
+            voice_call.timeline.add(
+                "CALL_TRANSCRIPT_CAPTURED",
+                characters=len(transcript),
+            )
+        await self.store.update_call_item(
+            item_id,
+            call_finished_at=datetime.now(UTC),
+            transcript=transcript,
+            **fields,
+        )
+        try:
+            await self.store.save_call_record(item_id)
+        except Exception:
+            logger.exception(
+                "Unable to persist call-history snapshot: item=%s",
+                item_id,
+            )
 
     @staticmethod
     def _limit_stop_reason(

@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime
 from types import SimpleNamespace
 
 from elvin.services.call_queue import CallQueueManager
@@ -8,12 +9,16 @@ class _Store:
     def __init__(self) -> None:
         self.item_updates: list[tuple[str, dict[str, object]]] = []
         self.batch_increments: list[tuple[str, dict[str, int]]] = []
+        self.saved_call_records: list[str] = []
 
     async def update_call_item(self, item_id: str, **fields: object) -> None:
         self.item_updates.append((item_id, fields))
 
     async def increment_call_batch(self, batch_id: str, **fields: int) -> None:
         self.batch_increments.append((batch_id, fields))
+
+    async def save_call_record(self, item_id: str) -> None:
+        self.saved_call_records.append(item_id)
 
 
 class _LPTracker:
@@ -131,3 +136,31 @@ def test_no_answer_moves_stage_without_incrementing_lead_counter() -> None:
     assert lptracker.moves == [("token", 321, 88)]
     assert store.item_updates[0][1]["outcome"] == "no_answer"
     assert store.batch_increments == []
+
+
+def test_finish_call_item_persists_gemini_transcript() -> None:
+    manager, store, _lptracker = _manager()
+    timeline = _Timeline()
+    voice_call = SimpleNamespace(
+        timeline=timeline,
+        gemini=SimpleNamespace(
+            conversation_transcript=lambda: "Клиент: Алло.\n\nЭлвин: Да, приветствую."
+        ),
+    )
+
+    async def exercise() -> None:
+        await manager._finish_call_item(
+            "item-history",
+            voice_call,
+            status="COMPLETED",
+            result="completed",
+        )
+
+    asyncio.run(exercise())
+    item_id, fields = store.item_updates[-1]
+    assert item_id == "item-history"
+    assert fields["status"] == "COMPLETED"
+    assert fields["transcript"].startswith("Клиент: Алло")
+    assert isinstance(fields["call_finished_at"], datetime)
+    assert timeline.events[-1][0] == "CALL_TRANSCRIPT_CAPTURED"
+    assert store.saved_call_records == ["item-history"]

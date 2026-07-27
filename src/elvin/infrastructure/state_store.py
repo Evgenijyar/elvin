@@ -20,6 +20,7 @@ DEFAULT_STATE: dict[str, Any] = {
     "assignments": [],
     "call_batches": [],
     "call_queue_items": [],
+    "call_records": [],
     "webhooks": [],
 }
 
@@ -73,6 +74,11 @@ CALL_ITEM_DEFAULTS: dict[str, Any] = {
     "outcome": "",
     "destination_stage_id": None,
     "destination_stage_name": "",
+    "phone_number": "",
+    "call_started_at": None,
+    "call_finished_at": None,
+    "transcript": "",
+    "analysis": "",
 }
 
 
@@ -278,6 +284,11 @@ class StateStore:
                 "ALTER TABLE app.call_queue_items ADD COLUMN IF NOT EXISTS outcome TEXT NOT NULL DEFAULT ''",
                 "ALTER TABLE app.call_queue_items ADD COLUMN IF NOT EXISTS destination_stage_id BIGINT",
                 "ALTER TABLE app.call_queue_items ADD COLUMN IF NOT EXISTS destination_stage_name TEXT NOT NULL DEFAULT ''",
+                "ALTER TABLE app.call_queue_items ADD COLUMN IF NOT EXISTS phone_number TEXT NOT NULL DEFAULT ''",
+                "ALTER TABLE app.call_queue_items ADD COLUMN IF NOT EXISTS call_started_at TIMESTAMPTZ",
+                "ALTER TABLE app.call_queue_items ADD COLUMN IF NOT EXISTS call_finished_at TIMESTAMPTZ",
+                "ALTER TABLE app.call_queue_items ADD COLUMN IF NOT EXISTS transcript TEXT NOT NULL DEFAULT ''",
+                "ALTER TABLE app.call_queue_items ADD COLUMN IF NOT EXISTS analysis TEXT NOT NULL DEFAULT ''",
             ):
                 await connection.execute(statement)
 
@@ -291,6 +302,42 @@ class StateStore:
                 """
                 CREATE INDEX IF NOT EXISTS idx_call_queue_items_batch_status_position
                 ON app.call_queue_items(batch_id, status, position)
+                """
+            )
+            await connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS app.call_records (
+                    id UUID PRIMARY KEY,
+                    call_item_id UUID NOT NULL UNIQUE,
+                    batch_id UUID NOT NULL,
+                    assignment_id UUID NOT NULL,
+                    project_id BIGINT NOT NULL,
+                    project_name TEXT NOT NULL DEFAULT '',
+                    robot_id UUID NOT NULL,
+                    robot_name TEXT NOT NULL DEFAULT '',
+                    lead_id BIGINT NOT NULL,
+                    lead_name TEXT NOT NULL DEFAULT '',
+                    contact_name TEXT NOT NULL DEFAULT '',
+                    phone_number TEXT NOT NULL DEFAULT '',
+                    phone_masked TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT '',
+                    result TEXT NOT NULL DEFAULT '',
+                    outcome TEXT NOT NULL DEFAULT '',
+                    destination_stage_id BIGINT,
+                    destination_stage_name TEXT NOT NULL DEFAULT '',
+                    call_started_at TIMESTAMPTZ NOT NULL,
+                    call_finished_at TIMESTAMPTZ NOT NULL,
+                    transcript TEXT NOT NULL DEFAULT '',
+                    analysis TEXT NOT NULL DEFAULT '',
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+            await connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_call_records_started
+                ON app.call_records(call_started_at DESC)
                 """
             )
             await connection.execute(
@@ -863,7 +910,14 @@ class StateStore:
                 "lead_id": int(item["lead_id"]),
                 "lead_name": str(item.get("lead_name") or ""),
                 "contact_name": str(item.get("contact_name") or ""),
-                "phone_masked": str(item.get("phone") or ""),
+                "phone_masked": str(
+                    item.get("phone_masked") or item.get("phone") or ""
+                ),
+                "phone_number": str(item.get("phone_number") or ""),
+                "call_started_at": None,
+                "call_finished_at": None,
+                "transcript": "",
+                "analysis": "",
                 "status": "PENDING",
                 "result": "",
                 "outcome": "",
@@ -913,9 +967,9 @@ class StateStore:
                         """
                         INSERT INTO app.call_queue_items(
                             id, batch_id, position, lead_id, lead_name,
-                            contact_name, phone_masked, status
+                            contact_name, phone_masked, phone_number, status
                         ) VALUES(
-                            $1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8
+                            $1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9
                         )
                         """,
                         [
@@ -927,6 +981,7 @@ class StateStore:
                                 item["lead_name"],
                                 item["contact_name"],
                                 item["phone_masked"],
+                                item["phone_number"],
                                 item["status"],
                             )
                             for item in queue_items
@@ -1127,6 +1182,10 @@ class StateStore:
             "outcome",
             "destination_stage_id",
             "destination_stage_name",
+            "call_started_at",
+            "call_finished_at",
+            "transcript",
+            "analysis",
         }
         updates = {key: value for key, value in fields.items() if key in allowed}
         if not updates:
@@ -1151,9 +1210,209 @@ class StateStore:
                 None,
             )
             if item is not None:
-                item.update(updates)
+                local_updates = {
+                    key: (value.isoformat() if isinstance(value, datetime) else value)
+                    for key, value in updates.items()
+                }
+                item.update(local_updates)
                 item["updated_at"] = datetime.now(UTC).isoformat()
                 await self._write_local_unlocked(state)
+
+    async def save_call_record(self, item_id: str) -> None:
+        """Persist a call snapshot detached from queue cascades."""
+        if self.mode == "postgres" and self.pool is not None:
+            await self.pool.execute(
+                """
+                INSERT INTO app.call_records(
+                    id, call_item_id, batch_id, assignment_id, project_id,
+                    project_name, robot_id, robot_name, lead_id, lead_name,
+                    contact_name, phone_number, phone_masked, status, result,
+                    outcome, destination_stage_id, destination_stage_name,
+                    call_started_at, call_finished_at, transcript, analysis,
+                    updated_at
+                )
+                SELECT item.id, item.id, item.batch_id, batch.assignment_id,
+                       batch.project_id, assignment.project_name, batch.robot_id,
+                       robot.name, item.lead_id, item.lead_name, item.contact_name,
+                       item.phone_number, item.phone_masked, item.status, item.result,
+                       item.outcome, item.destination_stage_id,
+                       item.destination_stage_name, item.call_started_at,
+                       item.call_finished_at, item.transcript, item.analysis, NOW()
+                FROM app.call_queue_items item
+                JOIN app.call_batches batch ON batch.id=item.batch_id
+                JOIN app.project_robot_assignments assignment
+                  ON assignment.id=batch.assignment_id
+                JOIN app.robot_profiles robot ON robot.id=batch.robot_id
+                WHERE item.id=$1::uuid
+                  AND item.call_started_at IS NOT NULL
+                  AND item.call_finished_at IS NOT NULL
+                ON CONFLICT(call_item_id) DO UPDATE SET
+                    status=EXCLUDED.status,
+                    result=EXCLUDED.result,
+                    outcome=EXCLUDED.outcome,
+                    destination_stage_id=EXCLUDED.destination_stage_id,
+                    destination_stage_name=EXCLUDED.destination_stage_name,
+                    call_started_at=EXCLUDED.call_started_at,
+                    call_finished_at=EXCLUDED.call_finished_at,
+                    transcript=EXCLUDED.transcript,
+                    analysis=EXCLUDED.analysis,
+                    updated_at=NOW()
+                """,
+                item_id,
+            )
+            return
+
+        async with self._local_lock:
+            state = await self._read_local_unlocked()
+            item = next(
+                (row for row in state["call_queue_items"] if row["id"] == item_id),
+                None,
+            )
+            if (
+                item is None
+                or not item.get("call_started_at")
+                or not item.get("call_finished_at")
+            ):
+                return
+            batch = next(
+                (row for row in state["call_batches"] if row["id"] == item["batch_id"]),
+                {},
+            )
+            assignment = next(
+                (
+                    row
+                    for row in state["assignments"]
+                    if row["id"] == batch.get("assignment_id")
+                ),
+                {},
+            )
+            robot = next(
+                (row for row in state["robots"] if row["id"] == batch.get("robot_id")),
+                {},
+            )
+            now = datetime.now(UTC).isoformat()
+            record = {
+                "id": item["id"],
+                "call_item_id": item["id"],
+                "batch_id": item["batch_id"],
+                "assignment_id": batch.get("assignment_id", ""),
+                "project_id": batch.get("project_id"),
+                "project_name": assignment.get("project_name", ""),
+                "robot_id": batch.get("robot_id", ""),
+                "robot_name": robot.get("name", ""),
+                "lead_id": item.get("lead_id"),
+                "lead_name": item.get("lead_name", ""),
+                "contact_name": item.get("contact_name", ""),
+                "phone_number": item.get("phone_number", ""),
+                "phone_masked": item.get("phone_masked", ""),
+                "status": item.get("status", ""),
+                "result": item.get("result", ""),
+                "outcome": item.get("outcome", ""),
+                "destination_stage_id": item.get("destination_stage_id"),
+                "destination_stage_name": item.get("destination_stage_name", ""),
+                "call_started_at": item["call_started_at"],
+                "call_finished_at": item["call_finished_at"],
+                "transcript": item.get("transcript", ""),
+                "analysis": item.get("analysis", ""),
+                "created_at": now,
+                "updated_at": now,
+            }
+            existing = next(
+                (
+                    row
+                    for row in state["call_records"]
+                    if row.get("call_item_id") == item_id
+                ),
+                None,
+            )
+            if existing is None:
+                state["call_records"].append(record)
+            else:
+                created_at = existing.get("created_at", now)
+                existing.update(record)
+                existing["created_at"] = created_at
+            await self._write_local_unlocked(state)
+
+    async def list_calls(
+        self,
+        *,
+        date_from: str | None = None,
+        date_to: str | None = None,
+        phone: str = "",
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Return persistent call-history snapshots for the UI."""
+        safe_limit = max(1, min(int(limit), 200))
+        safe_offset = max(0, int(offset))
+        phone_digits = "".join(character for character in phone if character.isdigit())
+
+        if self.mode == "postgres" and self.pool is not None:
+            conditions = ["TRUE"]
+            values: list[Any] = []
+            if date_from:
+                values.append(date_from)
+                conditions.append(f"call_started_at >= ${len(values)}::date")
+            if date_to:
+                values.append(date_to)
+                conditions.append(
+                    f"call_started_at < (${len(values)}::date + INTERVAL '1 day')"
+                )
+            if phone_digits:
+                values.append(f"%{phone_digits}%")
+                conditions.append(
+                    "regexp_replace(COALESCE(NULLIF(phone_number, ''), "
+                    "phone_masked), '[^0-9]', '', 'g') "
+                    f"LIKE ${len(values)}"
+                )
+            where_clause = " AND ".join(conditions)
+            total = int(
+                await self.pool.fetchval(
+                    f"SELECT COUNT(*) FROM app.call_records WHERE {where_clause}",
+                    *values,
+                )
+                or 0
+            )
+            rows = await self.pool.fetch(
+                f"""
+                SELECT * FROM app.call_records
+                WHERE {where_clause}
+                ORDER BY call_started_at DESC, updated_at DESC
+                LIMIT ${len(values) + 1} OFFSET ${len(values) + 2}
+                """,
+                *values,
+                safe_limit,
+                safe_offset,
+            )
+            return [self._call_record_row(row) for row in rows], total
+
+        state = await self._read_local()
+        filtered: list[dict[str, Any]] = []
+        for stored in state["call_records"]:
+            item = deepcopy(stored)
+            started_date = str(item.get("call_started_at") or "")[:10]
+            if date_from and started_date < date_from:
+                continue
+            if date_to and started_date > date_to:
+                continue
+            item_phone_digits = "".join(
+                character
+                for character in str(
+                    item.get("phone_number") or item.get("phone_masked") or ""
+                )
+                if character.isdigit()
+            )
+            if phone_digits and phone_digits not in item_phone_digits:
+                continue
+            filtered.append(item)
+        filtered.sort(
+            key=lambda item: str(
+                item.get("call_started_at") or item.get("updated_at") or ""
+            ),
+            reverse=True,
+        )
+        total = len(filtered)
+        return filtered[safe_offset : safe_offset + safe_limit], total
 
     async def save_webhook_event(
         self,
@@ -1244,8 +1503,34 @@ class StateStore:
         item["batch_id"] = str(item["batch_id"])
         item["created_at"] = item["created_at"].isoformat()
         item["updated_at"] = item["updated_at"].isoformat()
+        for key in ("call_started_at", "call_finished_at"):
+            value = item.get(key)
+            if value is not None and hasattr(value, "isoformat"):
+                item[key] = value.isoformat()
         for key, default in CALL_ITEM_DEFAULTS.items():
             item.setdefault(key, deepcopy(default))
+        return item
+
+    def _call_record_row(self, row: asyncpg.Record) -> dict[str, Any]:
+        item = dict(row)
+        for key in (
+            "id",
+            "call_item_id",
+            "batch_id",
+            "assignment_id",
+            "robot_id",
+        ):
+            if item.get(key) is not None:
+                item[key] = str(item[key])
+        for key in (
+            "call_started_at",
+            "call_finished_at",
+            "created_at",
+            "updated_at",
+        ):
+            value = item.get(key)
+            if value is not None and hasattr(value, "isoformat"):
+                item[key] = value.isoformat()
         return item
 
     def _assignment_row(self, row: asyncpg.Record) -> dict[str, Any]:

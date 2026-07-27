@@ -11,7 +11,17 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from elvin import __version__
-from elvin.api.routes import auth, dashboard, media, projects, robots, settings, system, webhooks
+from elvin.api.routes import (
+    auth,
+    calls,
+    dashboard,
+    media,
+    projects,
+    robots,
+    settings,
+    system,
+    webhooks,
+)
 from elvin.config import get_settings
 from elvin.infrastructure.state_store import StateStore
 from elvin.integrations.lptracker import LPTrackerClient, LPTrackerError
@@ -116,7 +126,17 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    for route in (system, auth, projects, robots, settings, dashboard, webhooks, media):
+    for route in (
+        system,
+        auth,
+        projects,
+        robots,
+        settings,
+        dashboard,
+        calls,
+        webhooks,
+        media,
+    ):
         application.include_router(route.router, prefix="/api")
 
     application.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

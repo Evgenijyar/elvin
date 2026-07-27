@@ -377,3 +377,182 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); box-sha
     .limits-grid,
     .outcome-condition-grid { grid-template-columns: 1fr; }
 }
+
+/* Universal tactile feedback for every interactive button */
+button {
+    transition:
+        transform .10s ease,
+        filter .15s ease,
+        background-color .15s ease,
+        border-color .15s ease,
+        box-shadow .15s ease,
+        color .15s ease;
+}
+button:not(:disabled):hover {
+    filter: brightness(1.12);
+    transform: translateY(-1px);
+}
+button:not(:disabled):active {
+    filter: brightness(.94);
+    transform: translateY(1px) scale(.985);
+}
+button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+    box-shadow: 0 0 0 4px rgba(125, 140, 255, .16);
+}
+button:disabled {
+    transform: none;
+    filter: none;
+}
+
+/* Completed call history */
+.call-history-heading { align-items: center; }
+.history-count {
+    padding: 9px 13px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--panel-2);
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 800;
+}
+.call-history-filters {
+    display: grid;
+    grid-template-columns: minmax(150px, .7fr) minmax(150px, .7fr) minmax(240px, 1.5fr) auto;
+    gap: 14px;
+    align-items: end;
+    margin-bottom: 22px;
+    padding: 18px;
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    background: var(--panel);
+}
+.call-history-filters label { margin: 0; }
+.call-filter-actions { display: flex; gap: 10px; padding-bottom: 1px; }
+.call-filter-actions button { min-width: 104px; }
+.history-message {
+    padding: 36px 20px;
+    border: 1px dashed var(--border);
+    border-radius: 16px;
+    color: var(--muted);
+    text-align: center;
+}
+.call-history-list { display: grid; gap: 12px; }
+.call-history-footer {
+    display: flex;
+    justify-content: center;
+    padding: 18px 0 4px;
+}
+.call-history-footer button { min-width: 180px; }
+.call-history-card {
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    background: var(--panel);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, .12);
+    transition: border-color .18s ease, box-shadow .18s ease, background-color .18s ease;
+}
+.call-history-card:hover { border-color: rgba(125, 140, 255, .28); }
+.call-history-card.expanded {
+    border-color: rgba(125, 140, 255, .42);
+    box-shadow: 0 18px 48px rgba(0, 0, 0, .24);
+}
+.call-card-toggle {
+    width: 100%;
+    display: grid;
+    grid-template-columns: 32px minmax(120px, .7fr) minmax(180px, 1fr) minmax(220px, 1.2fr);
+    gap: 16px;
+    align-items: center;
+    padding: 18px 20px;
+    border: 0;
+    background: transparent;
+    color: var(--text);
+    text-align: left;
+    cursor: pointer;
+}
+.call-card-toggle:not(:disabled):hover {
+    background: rgba(125, 140, 255, .045);
+    transform: none;
+}
+.call-card-toggle:not(:disabled):active {
+    background: rgba(125, 140, 255, .09);
+    transform: scale(.997);
+}
+.call-chevron {
+    display: grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 9px;
+    background: rgba(125, 140, 255, .10);
+    color: #cfd3ff;
+    font-size: 20px;
+    transform: rotate(0deg);
+    transition: transform .18s ease, background-color .18s ease;
+}
+.call-history-card.expanded .call-chevron {
+    background: rgba(125, 140, 255, .20);
+    transform: rotate(180deg);
+}
+.call-summary-cell { min-width: 0; }
+.call-summary-cell small {
+    display: block;
+    margin-bottom: 5px;
+    color: var(--muted);
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+}
+.call-summary-cell strong {
+    display: block;
+    overflow: hidden;
+    color: var(--text);
+    font-size: 14px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.call-card-details {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 16px;
+    padding: 0 20px 20px;
+    border-top: 1px solid var(--border);
+    animation: callDetailsOpen .18s ease-out;
+}
+.call-card-details label { margin: 18px 0 0; }
+.call-card-details textarea {
+    min-height: 310px;
+    resize: vertical;
+    background: #0b0f16;
+    line-height: 1.65;
+    white-space: pre-wrap;
+}
+.call-card-details textarea[readonly] { color: #dfe3ed; cursor: text; }
+.call-card-details textarea::placeholder { color: #667084; }
+@keyframes callDetailsOpen {
+    from { opacity: 0; transform: translateY(-6px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+@media (max-width: 980px) {
+    .call-history-filters { grid-template-columns: 1fr 1fr; }
+    .phone-filter { grid-column: 1 / -1; }
+    .call-filter-actions { grid-column: 1 / -1; justify-content: flex-end; }
+    .call-card-toggle { grid-template-columns: 28px 1fr 1.2fr; }
+    .call-time-cell { grid-column: 2 / -1; }
+    .call-card-details { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 620px) {
+    .call-history-filters { grid-template-columns: 1fr; }
+    .phone-filter,
+    .call-filter-actions { grid-column: auto; }
+    .call-filter-actions { flex-direction: column-reverse; }
+    .call-filter-actions button { width: 100%; }
+    .call-card-toggle { grid-template-columns: 28px 1fr; gap: 10px; }
+    .call-summary-cell,
+    .call-time-cell { grid-column: 2; }
+    .call-card-details { padding: 0 14px 14px; }
+}

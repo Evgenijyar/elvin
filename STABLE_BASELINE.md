@@ -1,34 +1,43 @@
-# Неприкосновенная стабильная точка Elvin
+# Неприкосновенные стабильные точки Elvin
 
-Проверенная production-сборка до разработки стадий, лимитов и фонового аудио:
+## Текущая стабильная база
 
-- тег Git: `v1.0.0-stable`;
-- commit: `55c1b469b47cfc38e07684e6715804872270c4ef`;
-- Docker-образ: `elvin-backend:55c1b469b47c`;
-- на момент фиксации ветки `main` и `production` указывали на этот commit.
+Все доработки версии 1.1.4 выполнены поверх присланной пользователем и
+зафиксированной стабильной сборки:
 
-Тег `v1.0.0-stable` в этой разработке не перемещается и не изменяется.
+- тег Git: `v1.1.3-stable`;
+- commit: `05f3c10e378343b11e07a25386568be377e2c852`;
+- назначение: локальные эффекты перебивания и отключённое по умолчанию хранение
+  тяжёлых артефактов звонков.
 
-## Проверка точки отката
+Тег `v1.1.3-stable` не перемещается и не изменяется при разработке истории
+звонков.
+
+## Предыдущие стабильные точки
+
+- `v1.1.2-stable` — `249a4b2ac88cb65cab528dffe3c93a13a75042ed`;
+- `v1.1.0-stable` — `3eaef60099bfef96f4feb0a666bc3698935e92f1`;
+- `v1.0.0-stable` — `55c1b469b47cfc38e07684e6715804872270c4ef`.
+
+## Проверка текущей точки отката
 
 ```bash
-git show --no-patch --decorate v1.0.0-stable
-git rev-parse v1.0.0-stable^{commit}
+git fetch --tags origin
+git rev-parse v1.1.3-stable^{commit}
 ```
 
 Ожидаемый commit:
 
 ```text
-55c1b469b47cfc38e07684e6715804872270c4ef
+05f3c10e378343b11e07a25386568be377e2c852
 ```
 
-## Откат Git при необходимости
+## Откат `main`
 
 ```bash
-git fetch --tags origin
-git checkout main
-git reset --hard v1.0.0-stable
-git push --force-with-lease origin main
+git fetch origin --tags
+git reset --hard v1.1.3-stable
+git push --force-with-lease origin HEAD:main
 ```
 
 После этого выполняется обычный серверный деплой:
@@ -36,6 +45,3 @@ git push --force-with-lease origin main
 ```bash
 elvin-deploy
 ```
-
-При необходимости можно повторно запустить сохранённый Docker-образ
-`elvin-backend:55c1b469b47c` согласно действующей серверной схеме Elvin.

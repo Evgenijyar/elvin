@@ -206,6 +206,8 @@ class LPTrackerClient:
                             "lead_name": lead.get("name") or "Без названия",
                             "contact_name": contact.get("name") or "",
                             "phone": self._mask_phone(phone),
+                            "phone_masked": self._mask_phone(phone),
+                            "phone_number": phone,
                             "stage_id": actual_stage,
                         }
                     )

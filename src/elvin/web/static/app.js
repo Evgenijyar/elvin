@@ -11,6 +11,11 @@ const state = {
     activeProjectId: null,
     selectedRobotId: null,
     queuePollTimer: null,
+    callHistory: { items: [], total: 0 },
+    callHistoryPageSize: 100,
+    callHistoryLoaded: false,
+    callHistoryLoading: false,
+    expandedCallId: null,
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -91,6 +96,9 @@ function bindEvents() {
     $("#assignmentForm").addEventListener("submit", createAssignment);
     $("#geminiSettingsForm").addEventListener("submit", saveGeminiSettings);
     $("#testGeminiButton").addEventListener("click", testGeminiSettings);
+    $("#callHistoryFilters").addEventListener("submit", applyCallHistoryFilters);
+    $("#resetCallFilters").addEventListener("click", resetCallHistoryFilters);
+    $("#loadMoreCalls").addEventListener("click", () => void loadCallHistory({ append: true }));
     $$(".nav-button").forEach((button) => {
         button.addEventListener("click", () => switchPage(button.dataset.page));
     });
@@ -134,6 +142,9 @@ async function handleLogout() {
     state.assignments = [];
     state.queues.clear();
     state.gemini = null;
+    state.callHistory = { items: [], total: 0 };
+    state.callHistoryLoaded = false;
+    state.expandedCallId = null;
     showLogin();
 }
 
@@ -153,10 +164,17 @@ async function enterApplication() {
 function startQueuePolling() {
     if (state.queuePollTimer) clearInterval(state.queuePollTimer);
     state.queuePollTimer = setInterval(() => {
-        if (!state.authenticated || state.activePage !== "calls") return;
-        $$("#assignmentGrid .assignment-card").forEach((card) => {
-            void refreshQueueCard(card.dataset.assignmentId, card);
-        });
+        if (!state.authenticated) return;
+        if (state.activePage === "calls") {
+            $$("#assignmentGrid .assignment-card").forEach((card) => {
+                void refreshQueueCard(card.dataset.assignmentId, card);
+            });
+        } else if (
+            state.activePage === "history"
+            && state.callHistory.items.length <= state.callHistoryPageSize
+        ) {
+            void loadCallHistory({ silent: true });
+        }
     }, 2000);
 }
 
@@ -198,6 +216,7 @@ function renderAll() {
     renderRobotList();
     renderRobotEditor();
     renderGeminiSettings();
+    if (state.callHistoryLoaded) renderCallHistory();
 }
 
 function renderRuntimeBadge() {
@@ -213,7 +232,145 @@ function switchPage(page) {
     $$(".page").forEach((section) => section.classList.toggle("active", section.id === `${page}Page`));
     if (page === "settings") {
         void reloadGeminiSettings();
+    } else if (page === "history") {
+        void loadCallHistory();
     }
+}
+
+
+function callHistoryParams({ offset = 0, limit = state.callHistoryPageSize } = {}) {
+    const params = new URLSearchParams();
+    const dateFrom = $("#callDateFrom").value;
+    const dateTo = $("#callDateTo").value;
+    const phone = $("#callPhoneSearch").value.trim();
+    if (dateFrom) params.set("date_from", dateFrom);
+    if (dateTo) params.set("date_to", dateTo);
+    if (phone) params.set("phone", phone);
+    params.set("limit", String(limit));
+    params.set("offset", String(offset));
+    return params;
+}
+
+async function loadCallHistory({ silent = false, append = false } = {}) {
+    if (state.callHistoryLoading) return;
+    state.callHistoryLoading = true;
+    const offset = append ? state.callHistory.items.length : 0;
+    if (!silent) {
+        $("#callHistoryLoading").classList.remove("hidden");
+        $("#callHistoryEmpty").classList.add("hidden");
+    }
+    $("#loadMoreCalls").disabled = true;
+    try {
+        const result = await api(`/api/calls?${callHistoryParams({ offset }).toString()}`);
+        const nextItems = result.items || [];
+        const mergedItems = append
+            ? [...state.callHistory.items, ...nextItems]
+            : nextItems;
+        const uniqueItems = [...new Map(
+            mergedItems.map((item) => [item.id, item]),
+        ).values()];
+        state.callHistory = {
+            items: uniqueItems,
+            total: Number(result.total || 0),
+        };
+        state.callHistoryLoaded = true;
+        if (!state.callHistory.items.some((item) => item.id === state.expandedCallId)) {
+            state.expandedCallId = null;
+        }
+        renderCallHistory();
+    } catch (error) {
+        if (!silent) showToast(error.message, true);
+    } finally {
+        state.callHistoryLoading = false;
+        $("#callHistoryLoading").classList.add("hidden");
+        $("#loadMoreCalls").disabled = false;
+    }
+}
+
+function applyCallHistoryFilters(event) {
+    event.preventDefault();
+    state.expandedCallId = null;
+    void loadCallHistory();
+}
+
+function resetCallHistoryFilters() {
+    $("#callDateFrom").value = "";
+    $("#callDateTo").value = "";
+    $("#callPhoneSearch").value = "";
+    state.expandedCallId = null;
+    void loadCallHistory();
+}
+
+function formatCallDate(value) {
+    if (!value) return "—";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    return new Intl.DateTimeFormat("ru-RU", {
+        day: "2-digit",
+        month: "2-digit",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+    }).format(date);
+}
+
+function callCountLabel(value) {
+    const count = Math.max(0, Number(value || 0));
+    const mod100 = count % 100;
+    const mod10 = count % 10;
+    const noun = mod100 >= 11 && mod100 <= 14
+        ? "звонков"
+        : mod10 === 1
+            ? "звонок"
+            : mod10 >= 2 && mod10 <= 4
+                ? "звонка"
+                : "звонков";
+    return `${count} ${noun}`;
+}
+
+function renderCallHistory() {
+    const items = state.callHistory.items || [];
+    $("#callHistoryCount").textContent = callCountLabel(state.callHistory.total);
+    $("#callHistoryEmpty").classList.toggle("hidden", items.length > 0);
+    $("#loadMoreCalls").classList.toggle(
+        "hidden",
+        items.length === 0 || items.length >= state.callHistory.total,
+    );
+    const container = $("#callHistoryList");
+    container.innerHTML = items.map((item) => {
+        const expanded = item.id === state.expandedCallId;
+        const phone = item.phone_number || item.phone_masked || "—";
+        const transcript = item.transcript || "Транскрипция отсутствует.";
+        const analysis = item.analysis || "";
+        return `
+            <article class="call-history-card ${expanded ? "expanded" : ""}" data-call-id="${escapeHtml(item.id)}">
+                <button class="call-card-toggle" type="button" aria-expanded="${expanded}" data-call-toggle="${escapeHtml(item.id)}">
+                    <span class="call-chevron">⌄</span>
+                    <span class="call-summary-cell"><small>ID лида</small><strong>${escapeHtml(item.lead_id)}</strong></span>
+                    <span class="call-summary-cell"><small>Телефон</small><strong>${escapeHtml(phone)}</strong></span>
+                    <span class="call-summary-cell call-time-cell"><small>Время звонка</small><strong>${escapeHtml(formatCallDate(item.call_started_at))}</strong></span>
+                </button>
+                <div class="call-card-details ${expanded ? "" : "hidden"}">
+                    <label class="call-transcript-field">
+                        <span>Транскрипция разговора</span>
+                        <textarea readonly>${escapeHtml(transcript)}</textarea>
+                    </label>
+                    <label class="call-analysis-field">
+                        <span>ИИ-анализ разговора</span>
+                        <textarea readonly placeholder="Анализ разговора будет добавлен позже.">${escapeHtml(analysis)}</textarea>
+                    </label>
+                </div>
+            </article>
+        `;
+    }).join("");
+    container.querySelectorAll("[data-call-toggle]").forEach((button) => {
+        button.addEventListener("click", () => {
+            const callId = button.dataset.callToggle;
+            state.expandedCallId = state.expandedCallId === callId ? null : callId;
+            renderCallHistory();
+        });
+    });
 }
 
 function renderProjectList() {

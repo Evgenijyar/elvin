@@ -38,6 +38,7 @@
             </div>
             <nav class="topnav">
                 <button class="nav-button active" data-page="calls">Обзвон</button>
+                <button class="nav-button" data-page="history">Звонки</button>
                 <button class="nav-button" data-page="robots">Роботы</button>
                 <button class="nav-button" data-page="settings">Настройки</button>
             </nav>
@@ -76,6 +77,43 @@
                             <button class="flat-button" data-open-assignment>Добавить робота</button>
                         </div>
                         <div id="assignmentGrid" class="assignment-grid"></div>
+                    </div>
+                </section>
+
+                <section id="historyPage" class="page">
+                    <div class="workspace-heading call-history-heading">
+                        <div>
+                            <div class="eyebrow">ИСТОРИЯ</div>
+                            <h2>Звонки</h2>
+                            <p class="muted">Завершённые вызовы и транскрипции Gemini Live.</p>
+                        </div>
+                        <div id="callHistoryCount" class="history-count">0 звонков</div>
+                    </div>
+
+                    <form id="callHistoryFilters" class="call-history-filters">
+                        <label>
+                            <span>Дата от</span>
+                            <input id="callDateFrom" type="date">
+                        </label>
+                        <label>
+                            <span>Дата до</span>
+                            <input id="callDateTo" type="date">
+                        </label>
+                        <label class="phone-filter">
+                            <span>Номер телефона</span>
+                            <input id="callPhoneSearch" type="search" placeholder="Введите номер или последние цифры">
+                        </label>
+                        <div class="call-filter-actions">
+                            <button id="resetCallFilters" class="flat-button" type="button">Сбросить</button>
+                            <button id="applyCallFilters" class="primary-button" type="submit">Найти</button>
+                        </div>
+                    </form>
+
+                    <div id="callHistoryLoading" class="history-message hidden">Загружаем звонки…</div>
+                    <div id="callHistoryEmpty" class="history-message hidden">Завершённых звонков по выбранным условиям пока нет.</div>
+                    <div id="callHistoryList" class="call-history-list"></div>
+                    <div class="call-history-footer">
+                        <button id="loadMoreCalls" class="flat-button hidden" type="button">Показать ещё</button>
                     </div>
                 </section>
 
