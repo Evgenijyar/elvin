@@ -18,6 +18,7 @@ async def list_calls(
     date_from: date | None = Query(default=None),
     date_to: date | None = Query(default=None),
     phone: str = Query(default="", max_length=64),
+    timezone_name: str = Query(default="UTC", alias="timezone", max_length=64),
     limit: int = Query(default=100, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, object]:
@@ -25,6 +26,7 @@ async def list_calls(
         date_from=date_from.isoformat() if date_from else None,
         date_to=date_to.isoformat() if date_to else None,
         phone=phone,
+        timezone_name=timezone_name,
         limit=limit,
         offset=offset,
     )

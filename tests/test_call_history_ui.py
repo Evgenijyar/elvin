@@ -13,6 +13,7 @@ def test_call_history_ui_contract() -> None:
     assert 'id="callPhoneSearch"' in html
     assert 'id="callDateFrom"' in html
     assert 'id="callDateTo"' in html
+    assert 'id="todayCallFilters"' in html
     assert 'id="loadMoreCalls"' in html
     assert 'loadCallHistory' in js
     assert 'state.expandedCallId === callId ? null : callId' in js
@@ -20,6 +21,11 @@ def test_call_history_ui_contract() -> None:
     assert 'append: true' in js
     assert 'offset' in js
     assert 'new Map' in js
+    assert 'CALL_HISTORY_FILTERS_SESSION_KEY' in js
+    assert 'sessionStorage.setItem' in js
+    assert 'Intl.DateTimeFormat().resolvedOptions().timeZone' in js
+    assert 'loadCallHistory({ silent: true })' not in js
+    assert 'requestId !== state.callHistoryRequestId' in js
     assert '.call-card-details' in css
     assert '.call-history-footer' in css
     assert 'button:not(:disabled):active' in css

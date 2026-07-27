@@ -117,3 +117,67 @@ def test_local_call_history_persists_transcript_and_filters(tmp_path: Path) -> N
         assert total == 0
 
     asyncio.run(exercise())
+
+
+def test_local_call_history_uses_browser_timezone_for_calendar_dates(tmp_path: Path) -> None:
+    settings = Settings(
+        ELVIN_DATA_DIR=tmp_path / "data",
+        ELVIN_LOG_DIR=tmp_path / "logs",
+        ELVIN_RECORDINGS_DIR=tmp_path / "recordings",
+    )
+    store = StateStore(settings)
+
+    async def exercise() -> None:
+        await store.initialize()
+        robot = await store.create_robot({"name": "Элвин"})
+        assignment = await store.create_assignment(
+            {
+                "project_id": 11,
+                "project_name": "Часовой пояс",
+                "robot_id": robot["id"],
+            }
+        )
+        batch = await store.create_call_batch(
+            assignment_id=assignment["id"],
+            project_id=11,
+            robot_id=robot["id"],
+            source_stage_id=7,
+            items=[
+                {
+                    "lead_id": 601,
+                    "lead_name": "Поздний звонок",
+                    "contact_name": "Анна",
+                    "phone": "+***0001",
+                    "phone_masked": "+***0001",
+                    "phone_number": "+31 6 0000 0001",
+                }
+            ],
+        )
+        item = (await store.list_call_items(batch["id"]))[0]
+        # 22:30 UTC is already the next calendar day in Amsterdam in July.
+        await store.update_call_item(
+            item["id"],
+            status="COMPLETED",
+            call_started_at=datetime(2026, 7, 27, 22, 30, tzinfo=UTC),
+            call_finished_at=datetime(2026, 7, 27, 22, 31, tzinfo=UTC),
+            transcript="Клиент: Алло.",
+        )
+        await store.save_call_record(item["id"])
+
+        calls, total = await store.list_calls(
+            date_from="2026-07-28",
+            date_to="2026-07-28",
+            timezone_name="Europe/Amsterdam",
+        )
+        assert total == 1
+        assert calls[0]["lead_id"] == 601
+
+        calls, total = await store.list_calls(
+            date_from="2026-07-27",
+            date_to="2026-07-27",
+            timezone_name="Europe/Amsterdam",
+        )
+        assert calls == []
+        assert total == 0
+
+    asyncio.run(exercise())

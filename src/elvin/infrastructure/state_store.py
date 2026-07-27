@@ -7,6 +7,7 @@ from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import asyncpg
 from asyncpg import Pool
@@ -80,6 +81,33 @@ CALL_ITEM_DEFAULTS: dict[str, Any] = {
     "transcript": "",
     "analysis": "",
 }
+
+
+def _safe_timezone_name(value: str) -> str:
+    candidate = str(value or "UTC").strip() or "UTC"
+    try:
+        ZoneInfo(candidate)
+    except ZoneInfoNotFoundError:
+        return "UTC"
+    return candidate
+
+
+def _call_local_date(value: Any, timezone_name: str) -> str:
+    if not value:
+        return ""
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        raw = str(value).strip()
+        if raw.endswith("Z"):
+            raw = f"{raw[:-1]}+00:00"
+        try:
+            parsed = datetime.fromisoformat(raw)
+        except ValueError:
+            return str(value)[:10]
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(ZoneInfo(timezone_name)).date().isoformat()
 
 
 class StateStore:
@@ -1339,24 +1367,34 @@ class StateStore:
         date_from: str | None = None,
         date_to: str | None = None,
         phone: str = "",
+        timezone_name: str = "UTC",
         limit: int = 100,
         offset: int = 0,
     ) -> tuple[list[dict[str, Any]], int]:
         """Return persistent call-history snapshots for the UI."""
         safe_limit = max(1, min(int(limit), 200))
         safe_offset = max(0, int(offset))
+        if date_from and date_to and date_from > date_to:
+            return [], 0
         phone_digits = "".join(character for character in phone if character.isdigit())
+        timezone_name = _safe_timezone_name(timezone_name)
 
         if self.mode == "postgres" and self.pool is not None:
             conditions = ["TRUE"]
             values: list[Any] = []
+            local_started_at = "call_started_at"
+            if date_from or date_to:
+                values.append(timezone_name)
+                local_started_at = (
+                    f"timezone(${len(values)}::text, call_started_at)"
+                )
             if date_from:
                 values.append(date_from)
-                conditions.append(f"call_started_at >= ${len(values)}::date")
+                conditions.append(f"{local_started_at} >= ${len(values)}::date")
             if date_to:
                 values.append(date_to)
                 conditions.append(
-                    f"call_started_at < (${len(values)}::date + INTERVAL '1 day')"
+                    f"{local_started_at} < (${len(values)}::date + INTERVAL '1 day')"
                 )
             if phone_digits:
                 values.append(f"%{phone_digits}%")
@@ -1390,7 +1428,9 @@ class StateStore:
         filtered: list[dict[str, Any]] = []
         for stored in state["call_records"]:
             item = deepcopy(stored)
-            started_date = str(item.get("call_started_at") or "")[:10]
+            started_date = _call_local_date(
+                item.get("call_started_at"), timezone_name
+            )
             if date_from and started_date < date_from:
                 continue
             if date_to and started_date > date_to:

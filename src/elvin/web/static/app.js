@@ -15,8 +15,12 @@ const state = {
     callHistoryPageSize: 100,
     callHistoryLoaded: false,
     callHistoryLoading: false,
+    callHistoryRequestId: 0,
     expandedCallId: null,
+    callHistoryFiltersInitialized: false,
 };
+
+const CALL_HISTORY_FILTERS_SESSION_KEY = "elvin.callHistoryFilters.v1";
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -97,7 +101,11 @@ function bindEvents() {
     $("#geminiSettingsForm").addEventListener("submit", saveGeminiSettings);
     $("#testGeminiButton").addEventListener("click", testGeminiSettings);
     $("#callHistoryFilters").addEventListener("submit", applyCallHistoryFilters);
+    $("#todayCallFilters").addEventListener("click", setTodayCallHistoryFilters);
     $("#resetCallFilters").addEventListener("click", resetCallHistoryFilters);
+    $("#callDateFrom").addEventListener("change", saveCallHistoryFilterSelection);
+    $("#callDateTo").addEventListener("change", saveCallHistoryFilterSelection);
+    $("#callPhoneSearch").addEventListener("input", saveCallHistoryFilterSelection);
     $("#loadMoreCalls").addEventListener("click", () => void loadCallHistory({ append: true }));
     $$(".nav-button").forEach((button) => {
         button.addEventListener("click", () => switchPage(button.dataset.page));
@@ -144,7 +152,9 @@ async function handleLogout() {
     state.gemini = null;
     state.callHistory = { items: [], total: 0 };
     state.callHistoryLoaded = false;
+    state.callHistoryRequestId = 0;
     state.expandedCallId = null;
+    state.callHistoryFiltersInitialized = false;
     showLogin();
 }
 
@@ -169,11 +179,6 @@ function startQueuePolling() {
             $$("#assignmentGrid .assignment-card").forEach((card) => {
                 void refreshQueueCard(card.dataset.assignmentId, card);
             });
-        } else if (
-            state.activePage === "history"
-            && state.callHistory.items.length <= state.callHistoryPageSize
-        ) {
-            void loadCallHistory({ silent: true });
         }
     }, 2000);
 }
@@ -233,10 +238,58 @@ function switchPage(page) {
     if (page === "settings") {
         void reloadGeminiSettings();
     } else if (page === "history") {
-        void loadCallHistory();
+        initializeCallHistoryFilters();
+        if (!state.callHistoryLoaded) void loadCallHistory();
     }
 }
 
+function localDateInputValue(date = new Date()) {
+    const localTime = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+    return localTime.toISOString().slice(0, 10);
+}
+
+function isDateInputValue(value) {
+    return /^\d{4}-\d{2}-\d{2}$/.test(String(value || ""));
+}
+
+function defaultCallHistoryFilters() {
+    const today = localDateInputValue();
+    return { dateFrom: today, dateTo: today, phone: "" };
+}
+
+function readCallHistoryFilterSelection() {
+    const defaults = defaultCallHistoryFilters();
+    try {
+        const stored = JSON.parse(sessionStorage.getItem(CALL_HISTORY_FILTERS_SESSION_KEY) || "{}");
+        return {
+            dateFrom: isDateInputValue(stored.dateFrom) ? stored.dateFrom : defaults.dateFrom,
+            dateTo: isDateInputValue(stored.dateTo) ? stored.dateTo : defaults.dateTo,
+            phone: typeof stored.phone === "string" ? stored.phone : "",
+        };
+    } catch (_) {
+        return defaults;
+    }
+}
+
+function initializeCallHistoryFilters() {
+    if (state.callHistoryFiltersInitialized) return;
+    const filters = readCallHistoryFilterSelection();
+    $("#callDateFrom").value = filters.dateFrom;
+    $("#callDateTo").value = filters.dateTo;
+    $("#callPhoneSearch").value = filters.phone;
+    state.callHistoryFiltersInitialized = true;
+}
+
+function saveCallHistoryFilterSelection() {
+    if (!state.callHistoryFiltersInitialized) return;
+    try {
+        sessionStorage.setItem(CALL_HISTORY_FILTERS_SESSION_KEY, JSON.stringify({
+            dateFrom: $("#callDateFrom").value,
+            dateTo: $("#callDateTo").value,
+            phone: $("#callPhoneSearch").value,
+        }));
+    } catch (_) {}
+}
 
 function callHistoryParams({ offset = 0, limit = state.callHistoryPageSize } = {}) {
     const params = new URLSearchParams();
@@ -246,22 +299,22 @@ function callHistoryParams({ offset = 0, limit = state.callHistoryPageSize } = {
     if (dateFrom) params.set("date_from", dateFrom);
     if (dateTo) params.set("date_to", dateTo);
     if (phone) params.set("phone", phone);
+    params.set("timezone", Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC");
     params.set("limit", String(limit));
     params.set("offset", String(offset));
     return params;
 }
 
-async function loadCallHistory({ silent = false, append = false } = {}) {
-    if (state.callHistoryLoading) return;
+async function loadCallHistory({ append = false } = {}) {
+    const requestId = ++state.callHistoryRequestId;
     state.callHistoryLoading = true;
     const offset = append ? state.callHistory.items.length : 0;
-    if (!silent) {
-        $("#callHistoryLoading").classList.remove("hidden");
-        $("#callHistoryEmpty").classList.add("hidden");
-    }
+    $("#callHistoryLoading").classList.remove("hidden");
+    $("#callHistoryEmpty").classList.add("hidden");
     $("#loadMoreCalls").disabled = true;
     try {
         const result = await api(`/api/calls?${callHistoryParams({ offset }).toString()}`);
+        if (requestId !== state.callHistoryRequestId) return;
         const nextItems = result.items || [];
         const mergedItems = append
             ? [...state.callHistory.items, ...nextItems]
@@ -279,24 +332,47 @@ async function loadCallHistory({ silent = false, append = false } = {}) {
         }
         renderCallHistory();
     } catch (error) {
-        if (!silent) showToast(error.message, true);
+        if (requestId === state.callHistoryRequestId) showToast(error.message, true);
     } finally {
-        state.callHistoryLoading = false;
-        $("#callHistoryLoading").classList.add("hidden");
-        $("#loadMoreCalls").disabled = false;
+        if (requestId === state.callHistoryRequestId) {
+            state.callHistoryLoading = false;
+            $("#callHistoryLoading").classList.add("hidden");
+            $("#loadMoreCalls").disabled = false;
+        }
     }
 }
 
 function applyCallHistoryFilters(event) {
     event.preventDefault();
+    initializeCallHistoryFilters();
+    const dateFrom = $("#callDateFrom").value;
+    const dateTo = $("#callDateTo").value;
+    if (dateFrom && dateTo && dateFrom > dateTo) {
+        showToast("Дата «от» не может быть позже даты «до».", true);
+        return;
+    }
+    saveCallHistoryFilterSelection();
+    state.expandedCallId = null;
+    void loadCallHistory();
+}
+
+function setTodayCallHistoryFilters() {
+    initializeCallHistoryFilters();
+    const today = localDateInputValue();
+    $("#callDateFrom").value = today;
+    $("#callDateTo").value = today;
+    saveCallHistoryFilterSelection();
     state.expandedCallId = null;
     void loadCallHistory();
 }
 
 function resetCallHistoryFilters() {
-    $("#callDateFrom").value = "";
-    $("#callDateTo").value = "";
+    initializeCallHistoryFilters();
+    const defaults = defaultCallHistoryFilters();
+    $("#callDateFrom").value = defaults.dateFrom;
+    $("#callDateTo").value = defaults.dateTo;
     $("#callPhoneSearch").value = "";
+    saveCallHistoryFilterSelection();
     state.expandedCallId = null;
     void loadCallHistory();
 }
