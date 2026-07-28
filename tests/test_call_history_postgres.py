@@ -97,6 +97,8 @@ def test_postgres_call_snapshot_and_filtered_listing(tmp_path: Path) -> None:
         count_query, count_values = pool.fetched[0]
         page_query, page_values = pool.fetched[1]
         assert "timezone($1::text, call_started_at)" in count_query
+        assert "$2::text::date" in count_query
+        assert "$3::text::date" in count_query
         assert "regexp_replace" in count_query
         assert count_values == (
             "Europe/Amsterdam",

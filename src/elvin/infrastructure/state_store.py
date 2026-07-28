@@ -1390,11 +1390,11 @@ class StateStore:
                 )
             if date_from:
                 values.append(date_from)
-                conditions.append(f"{local_started_at} >= ${len(values)}::date")
+                conditions.append(f"{local_started_at} >= ${len(values)}::text::date")
             if date_to:
                 values.append(date_to)
                 conditions.append(
-                    f"{local_started_at} < (${len(values)}::date + INTERVAL '1 day')"
+                    f"{local_started_at} < (${len(values)}::text::date + INTERVAL '1 day')"
                 )
             if phone_digits:
                 values.append(f"%{phone_digits}%")
