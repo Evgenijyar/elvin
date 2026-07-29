@@ -95,6 +95,15 @@ def _safe_timezone_name(value: str) -> str:
     return candidate
 
 
+def _canonical_phone_digits(value: Any) -> str:
+    digits = "".join(
+        character for character in str(value or "") if character.isdigit()
+    )
+    if len(digits) == 11 and digits[0] in {"7", "8"}:
+        return digits[1:]
+    return digits
+
+
 def _call_local_date(value: Any, timezone_name: str) -> str:
     if not value:
         return ""
@@ -1403,7 +1412,7 @@ class StateStore:
         safe_offset = max(0, int(offset))
         if date_from and date_to and date_from > date_to:
             return [], 0
-        phone_digits = "".join(character for character in phone if character.isdigit())
+        phone_digits = _canonical_phone_digits(phone)
         timezone_name = _safe_timezone_name(timezone_name)
 
         if self.mode == "postgres" and self.pool is not None:
@@ -1425,11 +1434,16 @@ class StateStore:
                 )
             if phone_digits:
                 values.append(f"%{phone_digits}%")
-                conditions.append(
+                raw_phone = (
                     "regexp_replace(COALESCE(NULLIF(phone_number, ''), "
-                    "phone_masked), '[^0-9]', '', 'g') "
-                    f"LIKE ${len(values)}"
+                    "phone_masked), '[^0-9]', '', 'g')"
                 )
+                canonical_phone = (
+                    f"CASE WHEN length({raw_phone}) = 11 "
+                    f"AND left({raw_phone}, 1) IN ('7', '8') "
+                    f"THEN right({raw_phone}, 10) ELSE {raw_phone} END"
+                )
+                conditions.append(f"({canonical_phone}) LIKE ${len(values)}")
             where_clause = " AND ".join(conditions)
             total = int(
                 await self.pool.fetchval(
@@ -1462,12 +1476,8 @@ class StateStore:
                 continue
             if date_to and started_date > date_to:
                 continue
-            item_phone_digits = "".join(
-                character
-                for character in str(
-                    item.get("phone_number") or item.get("phone_masked") or ""
-                )
-                if character.isdigit()
+            item_phone_digits = _canonical_phone_digits(
+                item.get("phone_number") or item.get("phone_masked") or ""
             )
             if phone_digits and phone_digits not in item_phone_digits:
                 continue

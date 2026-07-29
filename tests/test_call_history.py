@@ -95,6 +95,18 @@ def test_local_call_history_persists_transcript_and_filters(tmp_path: Path) -> N
         assert calls[0]["project_name"] == "Продажи"
         assert calls[0]["robot_name"] == "Элвин"
 
+        for equivalent_phone in (
+            "+7 999 123-45-67",
+            "7 999 123-45-67",
+            "8 999 123-45-67",
+            "9991234567",
+        ):
+            equivalent_calls, equivalent_total = await store.list_calls(
+                phone=equivalent_phone
+            )
+            assert equivalent_total == 1
+            assert equivalent_calls[0]["lead_id"] == 501
+
         page_one, total = await store.list_calls(limit=1, offset=0)
         page_two, second_total = await store.list_calls(limit=1, offset=1)
         assert total == second_total == 2

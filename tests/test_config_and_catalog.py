@@ -19,8 +19,14 @@ def test_local_settings_use_file_storage(tmp_path: Path) -> None:
 
 def test_fixed_model_and_voice_catalog() -> None:
     assert GEMINI_LIVE_MODEL_ID == "gemini-3.1-flash-live-preview"
-    assert len(VOICE_OPTIONS) == 30
-    assert {item.name for item in VOICE_OPTIONS} >= {"Kore", "Puck", "Aoede"}
+    assert [item.name for item in VOICE_OPTIONS] == [
+        "Zephyr", "Puck", "Charon", "Kore", "Fenrir", "Leda",
+        "Orus", "Aoede", "Callirrhoe", "Autonoe", "Enceladus",
+        "Iapetus", "Umbriel", "Algieba", "Despina", "Erinome",
+        "Algenib", "Rasalgethi", "Laomedeia", "Achernar", "Alnilam",
+        "Schedar", "Gacrux", "Pulcherrima", "Achird", "Zubenelgenubi",
+        "Vindemiatrix", "Sadachbia", "Sadaltager", "Sulafat",
+    ]
 
 
 def test_robot_interruption_settings_round_trip_in_local_storage(

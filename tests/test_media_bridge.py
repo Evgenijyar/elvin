@@ -694,7 +694,7 @@ def test_end_call_waits_for_playback_then_hangs_up_channel() -> None:
     bridge.websocket = websocket
     bridge.call = SimpleNamespace(
         gemini=gemini,
-        robot={"call_end_wait_ms": 1000, "call_end_delay_ms": 0},
+        robot={},
         timeline=timeline,
     )
     bridge.protocol = SimpleNamespace(
@@ -708,6 +708,12 @@ def test_end_call_waits_for_playback_then_hangs_up_channel() -> None:
 
     assert result == "robot_hangup"
     assert hangups == [("WebSocket/elvin/1", 16)]
+    requested = next(
+        payload for name, payload in timeline.events
+        if name == "ROBOT_END_CALL_REQUESTED"
+    )
+    assert "playback_wait_ms" not in requested
+    assert "delay_ms" not in requested
     assert websocket.closed
     assert any(
         name == "ROBOT_END_CALL_EXECUTED"
@@ -731,7 +737,7 @@ def test_end_call_falls_back_to_websocket_close_without_ami() -> None:
     bridge.websocket = websocket
     bridge.call = SimpleNamespace(
         gemini=gemini,
-        robot={"call_end_wait_ms": 0, "call_end_delay_ms": 0},
+        robot={},
         timeline=timeline,
     )
     bridge.protocol = SimpleNamespace(info=AsteriskMediaInfo(channel=""))
@@ -739,7 +745,15 @@ def test_end_call_falls_back_to_websocket_close_without_ami() -> None:
     bridge._playback_completed_generation = -1
     bridge._playback_completion_event = asyncio.Event()
 
-    assert asyncio.run(bridge._end_call_monitor()) == "robot_hangup"
+    async def exercise() -> str:
+        monitor = asyncio.create_task(bridge._end_call_monitor())
+        await asyncio.sleep(0)
+        assert not monitor.done()
+        bridge._playback_completed_generation = 1
+        bridge._playback_completion_event.set()
+        return await monitor
+
+    assert asyncio.run(exercise()) == "robot_hangup"
     assert websocket.closed
 
 
@@ -770,7 +784,7 @@ def test_end_call_prefers_native_chan_websocket_hangup_command() -> None:
     bridge.websocket = websocket
     bridge.call = SimpleNamespace(
         gemini=gemini,
-        robot={"call_end_wait_ms": 0, "call_end_delay_ms": 0},
+        robot={},
         timeline=timeline,
     )
     bridge.protocol = _Protocol()

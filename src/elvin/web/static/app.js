@@ -21,6 +21,7 @@ const state = {
 };
 
 const CALL_HISTORY_FILTERS_SESSION_KEY = "elvin.callHistoryFilters.v1";
+let confirmResolver = null;
 
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
@@ -107,10 +108,15 @@ function bindEvents() {
         button.addEventListener("click", () => insertStageReference(button.dataset.stageReference));
     });
     $("#openAssignmentModal").addEventListener("click", openAssignmentModal);
-    $$('[data-open-assignment]').forEach((button) => button.addEventListener("click", openAssignmentModal));
     $$('[data-close-modal]').forEach((button) => button.addEventListener("click", closeAssignmentModal));
     $$('[data-close-preview]').forEach((button) => button.addEventListener("click", closeLeadPreview));
     $$('[data-close-queue]').forEach((button) => button.addEventListener("click", closeQueue));
+    $("#confirmClose").addEventListener("click", () => closeConfirmation(false));
+    $("#confirmCancel").addEventListener("click", () => closeConfirmation(false));
+    $("#confirmAccept").addEventListener("click", () => closeConfirmation(true));
+    $("#confirmModal").addEventListener("click", (event) => {
+        if (event.target === $("#confirmModal")) closeConfirmation(false);
+    });
     $("#assignmentForm").addEventListener("submit", createAssignment);
     $("#geminiSettingsForm").addEventListener("submit", saveGeminiSettings);
     $("#testGeminiButton").addEventListener("click", testGeminiSettings);
@@ -563,16 +569,11 @@ async function renderCalls() {
             <div class="assignment-head">
                 <div>
                     <h3>${escapeHtml(item.robot_name)}</h3>
-                    <p>${escapeHtml(item.robot_description || "Описание не заполнено")}</p>
+                    <p>${escapeHtml(item.robot_description || "")}</p>
                 </div>
-                <span class="status-pill">${escapeHtml(item.status || "STOPPED")}</span>
+                <button class="assignment-delete" type="button" title="Удалить">×</button>
             </div>
             <div class="assignment-body">
-                <div class="assignment-meta">
-                    <div class="meta-cell"><span>Модель</span><strong>${escapeHtml(item.model_id)}</strong></div>
-                    <div class="meta-cell"><span>Голос</span><strong>${escapeHtml(item.voice_name)}</strong></div>
-                </div>
-
                 <div class="stage-grid">
                     ${stageField("Откуда забирать лиды", "source-stage", "source_stage_id", "source_stage_name", stages, item)}
                     ${stageField("Лид", "outcome-stage", "lead_stage_id", "lead_stage_name", stages, item)}
@@ -615,13 +616,9 @@ async function renderCalls() {
                     <strong>Загрузка…</strong>
                     <small></small>
                 </div>
-                <div class="assignment-actions multi-row">
-                    <button class="flat-button preview-button" type="button">Проверить лиды</button>
-                    <button class="flat-button prepare-queue" type="button">Собрать очередь</button>
+                <div class="assignment-actions compact">
                     <button class="flat-button show-queue" type="button">Открыть очередь</button>
-                    <button class="primary-button start" type="button">Старт</button>
-                    <button class="flat-button stop" type="button">Стоп</button>
-                    <button class="flat-button danger remove-assignment" type="button">Удалить</button>
+                    <button class="primary-button start-stop" type="button">Старт</button>
                 </div>
                 <div class="webhook-line ${item.webhook_registered ? "ok" : ""}">
                     ${item.webhook_registered ? "✓ Webhook LPTracker зарегистрирован" : (state.meta?.environment === "production" ? "Webhook пока не подтверждён" : "Webhook зарегистрируется после серверного деплоя")}
@@ -697,12 +694,9 @@ async function renderCalls() {
                 await renderCalls();
             } catch (error) { showToast(error.message, true); }
         });
-        card.querySelector(".preview-button").addEventListener("click", () => previewLeads(id));
-        card.querySelector(".prepare-queue").addEventListener("click", () => prepareQueue(id, card));
-        card.querySelector(".show-queue").addEventListener("click", () => showQueue(id));
-        card.querySelector(".remove-assignment").addEventListener("click", () => removeAssignment(id));
-        card.querySelector(".start").addEventListener("click", () => startAssignment(id, card));
-        card.querySelector(".stop").addEventListener("click", () => stopAssignment(id, card));
+        card.querySelector(".show-queue").addEventListener("click", () => openAssignmentQueue(id, card));
+        card.querySelector(".assignment-delete").addEventListener("click", () => removeAssignment(id));
+        card.querySelector(".start-stop").addEventListener("click", () => toggleAssignment(id, card));
         void refreshQueueCard(id, card);
     });
 }
@@ -714,7 +708,10 @@ async function refreshQueueCard(assignmentId, card) {
         const summary = card.querySelector("[data-queue-summary]");
         if (!result.batch) {
             summary.querySelector("strong").textContent = "Не сформирована";
-            summary.querySelector("small").textContent = "Нажмите «Собрать очередь»";
+            summary.querySelector("small").textContent = "";
+            card.querySelector(".calls-count").textContent = "0";
+            card.querySelector(".leads-count").textContent = "0";
+            renderStartStopButton(card, null);
             return;
         }
         const batch = result.batch;
@@ -723,11 +720,32 @@ async function refreshQueueCard(assignmentId, card) {
         summary.querySelector("small").textContent = `${batch.completed || 0} выполнено · ${batch.failed || 0} ошибок · ${batch.total || 0} всего${stopReason}`;
         card.querySelector(".calls-count").textContent = batch.calls_made || 0;
         card.querySelector(".leads-count").textContent = batch.leads_count || 0;
-        const statusPill = card.querySelector(".status-pill");
-        statusPill.textContent = batch.status;
+        renderStartStopButton(card, batch);
     } catch (error) {
         card.querySelector("[data-queue-summary] strong").textContent = "Ошибка загрузки";
+        renderStartStopButton(card, null);
     }
+}
+
+const ACTIVE_QUEUE_STATUSES = new Set([
+    "RUNNING",
+    "AI_PREPARING",
+    "CALL_REQUESTING",
+    "WAITING_FOR_MEDIA",
+    "IN_CALL",
+    "STOPPING",
+]);
+const REBUILD_QUEUE_STATUSES = new Set(["COMPLETED", "FAILED", "STOPPED"]);
+
+function renderStartStopButton(card, batch) {
+    const button = card.querySelector(".start-stop");
+    if (!button) return;
+    const active = Boolean(batch && ACTIVE_QUEUE_STATUSES.has(batch.status));
+    button.textContent = active ? "Стоп" : "Старт";
+    button.className = active
+        ? "flat-button danger start-stop"
+        : "primary-button start-stop";
+    button.disabled = batch?.status === "STOPPING";
 }
 
 async function previewLeads(assignmentId) {
@@ -751,33 +769,24 @@ async function previewLeads(assignmentId) {
     }
 }
 
-async function prepareQueue(assignmentId, card) {
-    const button = card.querySelector(".prepare-queue");
-    button.disabled = true;
-    button.textContent = "Собираем…";
-    try {
-        const result = await api(`/api/dashboard/assignments/${assignmentId}/queue`, { method: "POST" });
-        state.queues.set(assignmentId, result);
-        showToast(`Очередь собрана: ${result.batch.total} лидов`);
-        await refreshQueueCard(assignmentId, card);
-        renderQueueModal(result);
-    } catch (error) {
-        showToast(error.message, true);
-    } finally {
-        button.disabled = false;
-        button.textContent = "Собрать очередь";
-    }
-}
-
-async function showQueue(assignmentId) {
+async function openAssignmentQueue(assignmentId, card) {
     openQueue();
     $("#queueContent").innerHTML = '<p class="muted">Загружаем очередь…</p>';
+    const button = card.querySelector(".show-queue");
+    button.disabled = true;
     try {
-        const result = await api(`/api/dashboard/assignments/${assignmentId}/queue`);
+        let result = await api(`/api/dashboard/assignments/${assignmentId}/queue`);
+        if (!result.batch || REBUILD_QUEUE_STATUSES.has(result.batch.status)) {
+            result = await api(`/api/dashboard/assignments/${assignmentId}/queue`, { method: "POST" });
+            showToast(`Очередь собрана: ${result.batch.total} лидов`);
+        }
         state.queues.set(assignmentId, result);
         renderQueueModal(result);
+        await refreshQueueCard(assignmentId, card);
     } catch (error) {
         $("#queueContent").innerHTML = `<p class="error-text">${escapeHtml(error.message)}</p>`;
+    } finally {
+        button.disabled = false;
     }
 }
 
@@ -816,29 +825,32 @@ function renderQueueModal(result) {
     `;
 }
 
-async function startAssignment(assignmentId, card) {
+async function toggleAssignment(assignmentId, card) {
+    const button = card.querySelector(".start-stop");
+    button.disabled = true;
     try {
-        const result = await api(`/api/dashboard/assignments/${assignmentId}/start`, { method: "POST" });
-        showToast("Последовательный обзвон запущен");
-        state.queues.set(assignmentId, { batch: result.batch, items: [] });
+        const current = await api(`/api/dashboard/assignments/${assignmentId}/queue`);
+        state.queues.set(assignmentId, current);
+        const active = Boolean(current.batch && ACTIVE_QUEUE_STATUSES.has(current.batch.status));
+        const result = await api(
+            `/api/dashboard/assignments/${assignmentId}/${active ? "stop" : "start"}`,
+            { method: "POST" },
+        );
+        state.queues.set(assignmentId, {
+            batch: result.batch,
+            items: current.items || [],
+        });
+        showToast(active ? "Остановка очереди запрошена" : "Обзвон запущен");
         await refreshQueueCard(assignmentId, card);
     } catch (error) {
         showToast(error.message, true);
-    }
-}
-
-async function stopAssignment(assignmentId, card) {
-    try {
-        await api(`/api/dashboard/assignments/${assignmentId}/stop`, { method: "POST" });
-        showToast("Остановка очереди запрошена");
         await refreshQueueCard(assignmentId, card);
-    } catch (error) {
-        showToast(error.message, true);
     }
 }
 
 async function removeAssignment(assignmentId) {
-    if (!confirm("Удалить этого робота из проекта?")) return;
+    const confirmed = await requestConfirmation("Удалить робота?", "");
+    if (!confirmed) return;
     try {
         await api(`/api/dashboard/assignments/${assignmentId}`, { method: "DELETE" });
         state.assignments = state.assignments.filter((item) => item.id !== assignmentId);
@@ -883,11 +895,10 @@ function renderRobotEditor() {
     $("#robotName").value = robot.name || "";
     $("#robotDescription").value = robot.description || "";
     $("#robotModel").value = robot.model_id || "gemini-3.1-flash-live-preview";
-    $("#robotVoice").value = robot.voice_name || "Kore";
+    renderVoiceOptions(robot.voice_name || "Kore");
     $("#robotTemperature").value = robot.temperature ?? 0.3;
     $("#robotRole").value = robot.role_prompt || "";
     $("#robotKnowledge").value = robot.knowledge_base || "";
-    $("#robotFirstPhrase").value = robot.first_phrase || "";
     $("#robotLeadCondition").value = robot.lead_condition || "";
     $("#robotSpecialCondition").value = robot.special_condition || "";
     $("#robotRefusalCondition").value = robot.refusal_condition || "";
@@ -895,8 +906,6 @@ function renderRobotEditor() {
     $("#robotStopListCondition").value = robot.stop_list_condition || "";
     $("#robotAnsweringMachineCondition").value = robot.answering_machine_condition || "";
     $("#robotCallEndCondition").value = robot.call_end_condition || "";
-    $("#robotCallEndWaitMs").value = robot.call_end_wait_ms ?? 8000;
-    $("#robotCallEndDelayMs").value = robot.call_end_delay_ms ?? 250;
     $("#robotIgnoreShortInterjections").checked = Boolean(robot.ignore_short_interjections);
     $("#robotInterjectionMaxSpeechMs").value = robot.interjection_max_speech_ms ?? 650;
     $("#robotDelayedInterruption").checked = Boolean(robot.delayed_interruption);
@@ -906,11 +915,21 @@ function renderRobotEditor() {
     renderTemperature();
     renderInterruptionEffects();
     renderPromptConfiguration();
-    const key = $("#geminiKeyStatus");
-    key.textContent = state.gemini?.configured
-        ? "✓ Gemini API key настроен"
-        : "Gemini API key ещё не настроен. Откройте раздел «Настройки».";
-    key.classList.toggle("ok", Boolean(state.gemini?.configured));
+}
+
+function renderVoiceOptions(selectedName = "Kore") {
+    const voices = state.gemini?.voices || [];
+    const select = $("#robotVoice");
+    select.innerHTML = voices.map((voice) => (
+        `<option value="${escapeHtml(voice.name)}">${escapeHtml(voice.name)} — ${escapeHtml(voice.style)}</option>`
+    )).join("");
+    if (![...select.options].some((option) => option.value === selectedName)) {
+        const option = document.createElement("option");
+        option.value = selectedName;
+        option.textContent = selectedName;
+        select.append(option);
+    }
+    select.value = selectedName;
 }
 
 function renderTemperature() {
@@ -976,8 +995,6 @@ function renderPromptConfiguration() {
     const systemInstruction = [systemPrompt, knowledge].filter(Boolean).join("\n\n");
     const endConditionRaw = $("#robotCallEndCondition").value.trim();
     const endConditionResolved = resolveStageReferences(endConditionRaw);
-    $("#robotCallEndResolved").value = endConditionResolved;
-
     const lines = [
         "SYSTEM_INSTRUCTION",
         systemInstruction || "(не задана — system_instruction не отправляется)",
@@ -1011,7 +1028,6 @@ async function createRobot() {
                 temperature: 0.3,
                 role_prompt: "",
                 knowledge_base: "",
-                first_phrase: "",
                 lead_condition: "",
                 special_condition: "",
                 refusal_condition: "",
@@ -1019,8 +1035,6 @@ async function createRobot() {
                 stop_list_condition: "",
                 answering_machine_condition: "",
                 call_end_condition: "",
-                call_end_wait_ms: 8000,
-                call_end_delay_ms: 250,
                 ignore_short_interjections: false,
                 interjection_max_speech_ms: 650,
                 delayed_interruption: false,
@@ -1050,7 +1064,6 @@ async function saveRobot(event) {
         temperature: Number($("#robotTemperature").value),
         role_prompt: $("#robotRole").value,
         knowledge_base: $("#robotKnowledge").value,
-        first_phrase: $("#robotFirstPhrase").value,
         lead_condition: $("#robotLeadCondition").value,
         special_condition: $("#robotSpecialCondition").value,
         refusal_condition: $("#robotRefusalCondition").value,
@@ -1058,8 +1071,6 @@ async function saveRobot(event) {
         stop_list_condition: $("#robotStopListCondition").value,
         answering_machine_condition: $("#robotAnsweringMachineCondition").value,
         call_end_condition: $("#robotCallEndCondition").value,
-        call_end_wait_ms: Number($("#robotCallEndWaitMs").value),
-        call_end_delay_ms: Number($("#robotCallEndDelayMs").value),
         ignore_short_interjections: $("#robotIgnoreShortInterjections").checked,
         interjection_max_speech_ms: Number($("#robotInterjectionMaxSpeechMs").value),
         delayed_interruption: $("#robotDelayedInterruption").checked,
@@ -1090,7 +1101,9 @@ async function saveRobot(event) {
 
 async function deleteRobot() {
     const robot = selectedRobot();
-    if (!robot || !confirm(`Удалить робота «${robot.name}»? Его назначения тоже будут удалены.`)) return;
+    if (!robot) return;
+    const confirmed = await requestConfirmation("Удалить робота?", "");
+    if (!confirmed) return;
     try {
         await api(`/api/robots/${robot.id}`, { method: "DELETE" });
         state.robots = state.robots.filter((item) => item.id !== robot.id);
@@ -1118,8 +1131,6 @@ async function reloadGeminiSettings() {
 function renderGeminiSettings() {
     if (!state.gemini) return;
     $("#geminiApiKey").value = state.gemini.api_key || "";
-    $("#geminiModelId").value = state.gemini.model_id || "";
-    $("#geminiEndpoint").value = state.gemini.websocket_endpoint || "";
 }
 
 async function saveGeminiSettings(event) {
@@ -1177,6 +1188,22 @@ function openAssignmentModal() {
     $("#assignmentRobot").innerHTML = state.robots.map((robot) => `<option value="${robot.id}">${escapeHtml(robot.name)}</option>`).join("");
     $("#assignmentMessage").textContent = "";
     $("#assignmentModal").classList.remove("hidden");
+}
+
+function requestConfirmation(title, text = "") {
+    if (confirmResolver) confirmResolver(false);
+    $("#confirmTitle").textContent = title;
+    $("#confirmText").textContent = text;
+    $("#confirmText").classList.toggle("hidden", !text);
+    $("#confirmModal").classList.remove("hidden");
+    return new Promise((resolve) => { confirmResolver = resolve; });
+}
+
+function closeConfirmation(result) {
+    $("#confirmModal").classList.add("hidden");
+    const resolve = confirmResolver;
+    confirmResolver = null;
+    if (resolve) resolve(result);
 }
 
 function closeAssignmentModal() { $("#assignmentModal").classList.add("hidden"); }

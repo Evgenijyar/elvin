@@ -824,64 +824,26 @@ class AsteriskGeminiBridge:
             )
 
     async def _end_call_monitor(self) -> str:
-        """Wait for Gemini's visible ``end_call`` tool and hang up safely."""
+        """Wait until the current Gemini turn is played, then hang up."""
         await self.call.gemini.end_call_requested.wait()
         requested_generation = self.call.gemini.end_call_generation
         if requested_generation is None:
             requested_generation = self.call.gemini.generation
-        configured_wait_ms = self.call.robot.get("call_end_wait_ms")
-        configured_delay_ms = self.call.robot.get("call_end_delay_ms")
-        wait_ms = max(
-            0,
-            min(
-                int(8000 if configured_wait_ms is None else configured_wait_ms),
-                30_000,
-            ),
-        )
-        delay_ms = max(
-            0,
-            min(
-                int(250 if configured_delay_ms is None else configured_delay_ms),
-                5000,
-            ),
-        )
         self.call.timeline.add(
             "ROBOT_END_CALL_REQUESTED",
             generation=requested_generation,
             reason=self.call.gemini.end_call_reason,
-            playback_wait_ms=wait_ms,
-            delay_ms=delay_ms,
         )
 
-        if wait_ms > 0:
-            loop = asyncio.get_running_loop()
-            deadline = loop.time() + wait_ms / 1000.0
-            while (
-                self._playback_completed_generation < requested_generation
-                and loop.time() < deadline
-            ):
-                self._playback_completion_event.clear()
-                if self._playback_completed_generation >= requested_generation:
-                    break
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    break
-                try:
-                    await asyncio.wait_for(
-                        self._playback_completion_event.wait(),
-                        timeout=remaining,
-                    )
-                except TimeoutError:
-                    break
+        while self._playback_completed_generation < requested_generation:
+            self._playback_completion_event.clear()
+            if self._playback_completed_generation >= requested_generation:
+                break
+            await self._playback_completion_event.wait()
 
-        playback_confirmed = (
-            self._playback_completed_generation >= requested_generation
-        )
-        if delay_ms > 0:
-            await asyncio.sleep(delay_ms / 1000.0)
         await self._hangup_current_channel(
             reason=self.call.gemini.end_call_reason,
-            playback_confirmed=playback_confirmed,
+            playback_confirmed=True,
         )
         return "robot_hangup"
 

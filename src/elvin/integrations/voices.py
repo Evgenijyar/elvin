@@ -1,9 +1,4 @@
-"""Gemini voice catalogue used by the robot editor.
-
-Google publishes voice names and style descriptions, but does not publish a
-formal gender taxonomy.  The two UI groups below are a practical, subjective
-product classification and can be adjusted without changing stored data.
-"""
+"""Official Gemini prebuilt voice catalogue exposed by the robot editor."""
 
 from dataclasses import dataclass
 
@@ -16,36 +11,36 @@ class VoiceOption:
 
 
 VOICE_OPTIONS: tuple[VoiceOption, ...] = (
-    VoiceOption("Puck", "бодрый", "male"),
-    VoiceOption("Charon", "информативный", "male"),
-    VoiceOption("Fenrir", "эмоциональный", "male"),
-    VoiceOption("Orus", "уверенный", "male"),
-    VoiceOption("Enceladus", "с придыханием", "male"),
-    VoiceOption("Iapetus", "чёткий", "male"),
-    VoiceOption("Umbriel", "спокойный", "male"),
-    VoiceOption("Algieba", "плавный", "male"),
-    VoiceOption("Algenib", "хрипловатый", "male"),
-    VoiceOption("Rasalgethi", "информативный", "male"),
-    VoiceOption("Alnilam", "твёрдый", "male"),
-    VoiceOption("Schedar", "ровный", "male"),
-    VoiceOption("Achird", "дружелюбный", "male"),
-    VoiceOption("Zubenelgenubi", "разговорный", "male"),
-    VoiceOption("Sadachbia", "живой", "male"),
-    VoiceOption("Sadaltager", "знающий", "male"),
-    VoiceOption("Zephyr", "яркий", "female"),
-    VoiceOption("Kore", "уверенный", "female"),
-    VoiceOption("Leda", "молодой", "female"),
-    VoiceOption("Aoede", "лёгкий", "female"),
-    VoiceOption("Callirrhoe", "непринуждённый", "female"),
-    VoiceOption("Autonoe", "яркий", "female"),
-    VoiceOption("Despina", "плавный", "female"),
-    VoiceOption("Erinome", "чёткий", "female"),
-    VoiceOption("Laomedeia", "бодрый", "female"),
-    VoiceOption("Achernar", "мягкий", "female"),
-    VoiceOption("Gacrux", "зрелый", "female"),
-    VoiceOption("Pulcherrima", "прямой", "female"),
-    VoiceOption("Vindemiatrix", "нежный", "female"),
-    VoiceOption("Sulafat", "тёплый", "female"),
+    VoiceOption("Zephyr", "яркий", "all"),
+    VoiceOption("Puck", "бодрый", "all"),
+    VoiceOption("Charon", "информативный", "all"),
+    VoiceOption("Kore", "уверенный", "all"),
+    VoiceOption("Fenrir", "эмоциональный", "all"),
+    VoiceOption("Leda", "молодой", "all"),
+    VoiceOption("Orus", "уверенный", "all"),
+    VoiceOption("Aoede", "лёгкий", "all"),
+    VoiceOption("Callirrhoe", "непринуждённый", "all"),
+    VoiceOption("Autonoe", "яркий", "all"),
+    VoiceOption("Enceladus", "с придыханием", "all"),
+    VoiceOption("Iapetus", "чёткий", "all"),
+    VoiceOption("Umbriel", "непринуждённый", "all"),
+    VoiceOption("Algieba", "плавный", "all"),
+    VoiceOption("Despina", "плавный", "all"),
+    VoiceOption("Erinome", "чёткий", "all"),
+    VoiceOption("Algenib", "хрипловатый", "all"),
+    VoiceOption("Rasalgethi", "информативный", "all"),
+    VoiceOption("Laomedeia", "бодрый", "all"),
+    VoiceOption("Achernar", "мягкий", "all"),
+    VoiceOption("Alnilam", "уверенный", "all"),
+    VoiceOption("Schedar", "ровный", "all"),
+    VoiceOption("Gacrux", "зрелый", "all"),
+    VoiceOption("Pulcherrima", "прямой", "all"),
+    VoiceOption("Achird", "дружелюбный", "all"),
+    VoiceOption("Zubenelgenubi", "разговорный", "all"),
+    VoiceOption("Vindemiatrix", "нежный", "all"),
+    VoiceOption("Sadachbia", "живой", "all"),
+    VoiceOption("Sadaltager", "знающий", "all"),
+    VoiceOption("Sulafat", "тёплый", "all"),
 )
 
 

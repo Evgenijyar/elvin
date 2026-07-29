@@ -86,7 +86,7 @@ def test_postgres_call_snapshot_and_filtered_listing(tmp_path: Path) -> None:
         calls, total = await store.list_calls(
             date_from="2026-07-01",
             date_to="2026-07-31",
-            phone="123-45-67",
+            phone="8 999 123-45-67",
             timezone_name="Europe/Amsterdam",
             limit=25,
             offset=50,
@@ -100,18 +100,20 @@ def test_postgres_call_snapshot_and_filtered_listing(tmp_path: Path) -> None:
         assert "$2::text::date" in count_query
         assert "$3::text::date" in count_query
         assert "regexp_replace" in count_query
+        assert "THEN right(" in count_query
+        assert "IN ('7', '8')" in count_query
         assert count_values == (
             "Europe/Amsterdam",
             "2026-07-01",
             "2026-07-31",
-            "%1234567%",
+            "%9991234567%",
         )
         assert "ORDER BY call_started_at DESC" in page_query
         assert page_values == (
             "Europe/Amsterdam",
             "2026-07-01",
             "2026-07-31",
-            "%1234567%",
+            "%9991234567%",
             25,
             50,
         )

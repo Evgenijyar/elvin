@@ -64,8 +64,6 @@
                     <div id="callsEmpty" class="empty-state">
                         <div class="empty-icon">⌁</div>
                         <h2>Добавьте первого робота</h2>
-                        <p>Выберите проект LPTracker и сохранённого ИИ-робота.</p>
-                        <button class="primary-button" data-open-assignment>Добавить робота</button>
                     </div>
                     <div id="callsWorkspace" class="hidden">
                         <div class="workspace-heading">
@@ -74,7 +72,6 @@
                                 <h2 id="activeProjectName"></h2>
                                 <p id="activeProjectMeta" class="muted"></p>
                             </div>
-                            <button class="flat-button" data-open-assignment>Добавить робота</button>
                         </div>
                         <div id="assignmentGrid" class="assignment-grid"></div>
                     </div>
@@ -85,7 +82,6 @@
                         <div>
                             <div class="eyebrow">ИСТОРИЯ</div>
                             <h2>Звонки</h2>
-                            <p class="muted">Завершённые вызовы и транскрипции Gemini Live.</p>
                         </div>
                         <div id="callHistoryCount" class="history-count">0 звонков</div>
                     </div>
@@ -123,7 +119,6 @@
                         <div>
                             <div class="eyebrow">БИБЛИОТЕКА</div>
                             <h2>ИИ-роботы Elvin</h2>
-                            <p class="muted">Профили можно назначать на разные проекты LPTracker.</p>
                         </div>
                     </div>
                     <div class="robot-layout">
@@ -134,7 +129,6 @@
                         <section class="robot-editor-panel">
                             <div id="robotEditorEmpty" class="editor-empty">
                                 <h3>Робот не выбран</h3>
-                                <p>Создайте профиль или выберите существующий слева.</p>
                             </div>
                             <form id="robotEditor" class="robot-editor hidden">
                                 <div class="editor-tabs">
@@ -149,7 +143,6 @@
                                 <div class="tab-pane active" data-pane="role">
                                     <label>
                                         <span>Системный prompt</span>
-                                        <small>Текст отправляется Gemini дословно. Python не добавляет язык, стиль, сценарий, запреты или другие скрытые поведенческие инструкции.</small>
                                         <textarea id="robotRole" rows="22"></textarea>
                                     </label>
                                 </div>
@@ -157,34 +150,24 @@
                                 <div class="tab-pane" data-pane="knowledge">
                                     <label>
                                         <span>База знаний</span>
-                                        <small>Добавляется после системного prompt дословно, без автоматически вставленных заголовков и правил.</small>
                                         <textarea id="robotKnowledge" rows="22"></textarea>
                                     </label>
                                 </div>
 
                                 <div class="tab-pane" data-pane="stages">
-                                    <p class="muted stage-help">Каждое условие передаётся Gemini дословно как описание соответствующего tool. Backend не дописывает скрытые правила классификации. «Недозвон» определяется технически без участия Gemini.</p>
                                     <div class="outcome-condition-grid">
-                                        <label><span>Лид · mark_call_as_lead</span><textarea id="robotLeadCondition" rows="6" placeholder="Опишите полное условие вызова этого tool"></textarea></label>
-                                        <label><span>Спецстадия · mark_call_as_special</span><textarea id="robotSpecialCondition" rows="6" placeholder="Опишите полное условие вызова этого tool"></textarea></label>
-                                        <label><span>Отказ · mark_call_as_refusal</span><textarea id="robotRefusalCondition" rows="6" placeholder="Опишите полное условие вызова этого tool"></textarea></label>
-                                        <label><span>Перезвонить · mark_call_as_callback</span><textarea id="robotCallbackCondition" rows="6" placeholder="Опишите полное условие вызова этого tool"></textarea></label>
-                                        <label><span>Стоп-лист · mark_call_as_stop_list</span><textarea id="robotStopListCondition" rows="6" placeholder="Опишите полное условие вызова этого tool"></textarea></label>
-                                        <label><span>Автоответчик · mark_call_as_answering_machine</span><textarea id="robotAnsweringMachineCondition" rows="6" placeholder="Опишите полное условие вызова этого tool"></textarea></label>
+                                        <label><span>Лид</span><textarea id="robotLeadCondition" rows="6"></textarea></label>
+                                        <label><span>Спецстадия</span><textarea id="robotSpecialCondition" rows="6"></textarea></label>
+                                        <label><span>Отказ</span><textarea id="robotRefusalCondition" rows="6"></textarea></label>
+                                        <label><span>Перезвонить</span><textarea id="robotCallbackCondition" rows="6"></textarea></label>
+                                        <label><span>Стоп-лист</span><textarea id="robotStopListCondition" rows="6"></textarea></label>
+                                        <label><span>Автоответчик</span><textarea id="robotAnsweringMachineCondition" rows="6"></textarea></label>
                                     </div>
                                     <section class="call-end-editor">
                                         <div class="call-end-heading">
-                                            <div>
-                                                <h3>Завершение звонка со стороны робота</h3>
-                                                <p class="muted">Заполненное поле объявляет Gemini tool <code>end_call</code>. Укажите здесь все условия, момент вызова и необходимость сначала попрощаться. Пустое поле полностью отключает автоматическое завершение.</p>
-                                            </div>
+                                            <h3>Завершение звонка со стороны робота</h3>
                                         </div>
-                                        <label>
-                                            <span>Условия вызова end_call</span>
-                                            <textarea id="robotCallEndCondition" rows="10" placeholder="Например: после того как разговор логически завершён и финальная фраза уже произнесена, вызови end_call. Также вызови его при выполнении {{stage:stop_list}} или {{stage:callback}}."></textarea>
-                                        </label>
                                         <div class="stage-reference-row">
-                                            <span>Вставить ссылку на условие стадии:</span>
                                             <button type="button" class="reference-chip" data-stage-reference="lead">Лид</button>
                                             <button type="button" class="reference-chip" data-stage-reference="special">Спецстадия</button>
                                             <button type="button" class="reference-chip" data-stage-reference="refusal">Отказ</button>
@@ -192,19 +175,9 @@
                                             <button type="button" class="reference-chip" data-stage-reference="stop_list">Стоп-лист</button>
                                             <button type="button" class="reference-chip" data-stage-reference="answering_machine">Автоответчик</button>
                                         </div>
-                                        <div class="call-end-timing-grid">
-                                            <label>
-                                                <span>Максимальное ожидание проигрывания финальной реплики, мс</span>
-                                                <input id="robotCallEndWaitMs" type="number" min="0" max="30000" step="100" value="8000">
-                                            </label>
-                                            <label>
-                                                <span>Дополнительная пауза перед разрывом, мс</span>
-                                                <input id="robotCallEndDelayMs" type="number" min="0" max="5000" step="50" value="250">
-                                            </label>
-                                        </div>
                                         <label>
-                                            <span>Итоговое условие end_call после подстановки ссылок</span>
-                                            <textarea id="robotCallEndResolved" rows="8" readonly></textarea>
+                                            <span>Условия завершения звонка</span>
+                                            <textarea id="robotCallEndCondition" rows="3"></textarea>
                                         </label>
                                     </section>
                                 </div>
@@ -216,7 +189,6 @@
                                                 <input id="robotIgnoreShortInterjections" type="checkbox">
                                                 <span>Игнорирование коротких реплик</span>
                                             </label>
-                                            <p>Короткие «ага», «угу», «да-да» не прерывают робота и не отправляются в Gemini. Решение принимается локально по накопленному времени речи.</p>
                                             <label class="effect-range">
                                                 <span>Порог голосовой активности: <b id="interjectionSpeechValue">650 мс</b></span>
                                                 <input id="robotInterjectionMaxSpeechMs" type="range" min="100" max="2000" step="50" value="650">
@@ -228,7 +200,6 @@
                                                 <input id="robotDelayedInterruption" type="checkbox">
                                                 <span>Отсрочка перебивания</span>
                                             </label>
-                                            <p>После подтверждения полноценной реплики робот продолжает говорить заданное время и только затем освобождает линию для собеседника.</p>
                                             <label class="effect-range">
                                                 <span>Длина речевого хвоста: <b id="interruptionTailValue">250 мс</b></span>
                                                 <input id="robotInterruptionTailMs" type="range" min="0" max="2000" step="50" value="250">
@@ -240,7 +211,6 @@
                                                 <input id="robotInterruptionFadeEnabled" type="checkbox">
                                                 <span>Затихание голоса</span>
                                             </label>
-                                            <p>При подтверждённом перебивании громкость текущей реплики плавно снижается к концу речевого хвоста. Следующий ответ всегда начинается с обычной громкостью. Эффект работает совместно с отсрочкой перебивания.</p>
                                             <label class="effect-range">
                                                 <span>Длина затихающей части хвоста: <b id="interruptionFadeValue">200 мс</b></span>
                                                 <input id="robotInterruptionFadeMs" type="range" min="0" max="2000" step="50" value="200">
@@ -252,7 +222,6 @@
                                 <div class="tab-pane" data-pane="prompt-preview">
                                     <div class="prompt-preview-panel">
                                         <h3>Точная конфигурация Gemini</h3>
-                                        <p class="muted">Здесь показаны системная инструкция и описания tools, которые будут отправлены модели. Невидимых поведенческих добавок нет.</p>
                                         <pre id="robotPromptPreview"></pre>
                                     </div>
                                 </div>
@@ -264,8 +233,7 @@
                                             <input id="robotName" type="text" required>
                                         </label>
                                         <label>
-                                            <span>Описание профиля</span>
-                                            <small>Служебная подпись только для интерфейса; Gemini её не получает.</small>
+                                            <span>Описание</span>
                                             <input id="robotDescription" type="text">
                                         </label>
                                         <label>
@@ -276,25 +244,13 @@
                                         </label>
                                         <label>
                                             <span>Голос</span>
-                                            <select id="robotVoice">
-                                                <option>Kore</option>
-                                                <option>Puck</option>
-                                                <option>Aoede</option>
-                                                <option>Charon</option>
-                                                <option>Fenrir</option>
-                                            </select>
-                                        </label>
-                                        <label class="wide">
-                                            <span>Первая фраза</span>
-                                            <small>В текущем телефонном контуре отключена: робот ждёт первую реплику абонента. Поле оставлено для совместимости и не отправляется Gemini.</small>
-                                            <textarea id="robotFirstPhrase" rows="4" disabled></textarea>
+                                            <select id="robotVoice"></select>
                                         </label>
                                         <label class="wide">
                                             <span>Температура: <b id="temperatureValue">0.30</b></span>
                                             <input id="robotTemperature" type="range" min="0" max="2" step="0.05" value="0.3">
                                         </label>
                                     </div>
-                                    <div id="geminiKeyStatus" class="key-status"></div>
                                 </div>
 
                                 <div class="editor-footer">
@@ -314,7 +270,6 @@
                         <div>
                             <div class="eyebrow">ПОДКЛЮЧЕНИЕ К МОДЕЛИ</div>
                             <h2>Gemini Live</h2>
-                            <p class="muted">Ключ хранится в данных Elvin и никогда не попадает в Git.</p>
                         </div>
                     </div>
 
@@ -322,21 +277,7 @@
                         <label>
                             <span>Gemini API key</span>
                             <input id="geminiApiKey" type="text" autocomplete="off" spellcheck="false" placeholder="AIza...">
-                            <small>Ключ показывается полностью — без звёздочек и маскировки.</small>
                         </label>
-                        <div class="settings-grid">
-                            <label>
-                                <span>Модель</span>
-                                <input id="geminiModelId" type="text" readonly>
-                            </label>
-                            <label>
-                                <span>WebSocket endpoint</span>
-                                <input id="geminiEndpoint" type="text" readonly>
-                            </label>
-                        </div>
-                        <div class="settings-note">
-                            Endpoint и ID модели зафиксированы в backend. Их не нужно вводить вручную.
-                        </div>
                         <div id="geminiSettingsMessage" class="form-message"></div>
                         <div class="settings-actions">
                             <button id="testGeminiButton" class="flat-button" type="button">Проверить подключение</button>
@@ -398,6 +339,21 @@
                 <button class="icon-button" data-close-queue>×</button>
             </div>
             <div id="queueContent"></div>
+        </div>
+    </div>
+
+
+    <div id="confirmModal" class="modal-backdrop hidden">
+        <div class="modal-card confirm-modal-card">
+            <div class="modal-header">
+                <h3 id="confirmTitle">Удалить?</h3>
+                <button id="confirmClose" class="icon-button" type="button">×</button>
+            </div>
+            <p id="confirmText"></p>
+            <div class="modal-actions">
+                <button id="confirmCancel" class="flat-button" type="button">Отмена</button>
+                <button id="confirmAccept" class="flat-button danger" type="button">Удалить</button>
+            </div>
         </div>
     </div>
 
