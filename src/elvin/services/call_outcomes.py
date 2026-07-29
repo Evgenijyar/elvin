@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -73,14 +74,39 @@ CONVERSATION_OUTCOMES: tuple[CallOutcomeDefinition, ...] = (
 OUTCOME_BY_KEY = {item.key: item for item in CONVERSATION_OUTCOMES}
 OUTCOME_BY_TOOL = {item.tool_name: item for item in CONVERSATION_OUTCOMES}
 
+END_CALL_TOOL_NAME = "end_call"
+_STAGE_REFERENCE_PATTERN = re.compile(r"\{\{stage:([a-z_]+)\}\}")
+
 NO_ANSWER_KEY = "no_answer"
 NO_ANSWER_LABEL = "Недозвон"
 NO_ANSWER_STAGE_ID_FIELD = "no_answer_stage_id"
 NO_ANSWER_STAGE_NAME_FIELD = "no_answer_stage_name"
 
 
+def resolve_stage_references(text: str, robot: dict[str, Any]) -> str:
+    """Replace visible ``{{stage:key}}`` references with visible stage text.
+
+    The replacement contains no backend-authored behavioral instruction: the
+    model receives only text that the user entered in the robot editor.
+    Unknown or empty references are left untouched so a configuration mistake
+    remains visible in the prompt preview instead of silently changing meaning.
+    """
+
+    source = str(text or "")
+
+    def replace(match: re.Match[str]) -> str:
+        definition = OUTCOME_BY_KEY.get(match.group(1))
+        if definition is None:
+            return match.group(0)
+        condition = str(robot.get(definition.condition_field) or "").strip()
+        return condition if condition else match.group(0)
+
+    return _STAGE_REFERENCE_PATTERN.sub(replace, source)
+
+
 def configured_tool_declarations(robot: dict[str, Any]) -> list[dict[str, Any]]:
-    """Build explicit Gemini function declarations for configured outcomes."""
+    """Build tools using only conditions visible in the robot editor."""
+
     declarations: list[dict[str, Any]] = []
     for definition in CONVERSATION_OUTCOMES:
         condition = str(robot.get(definition.condition_field) or "").strip()
@@ -89,53 +115,35 @@ def configured_tool_declarations(robot: dict[str, Any]) -> list[dict[str, Any]]:
         declarations.append(
             {
                 "name": definition.tool_name,
-                "description": (
-                    f"Зафиксировать итог звонка «{definition.label}». "
-                    "Вызывай функцию только когда разговор уверенно соответствует "
-                    f"следующему условию: {condition}"
-                ),
+                # Deliberately verbatim: no hidden instruction or wrapper is
+                # added around the user-authored stage condition.
+                "description": condition,
                 "parameters": {
                     "type": "OBJECT",
-                    "properties": {
-                        "evidence": {
-                            "type": "STRING",
-                            "description": (
-                                "Краткое основание решения без персональных данных "
-                                "и без дословной длинной цитаты."
-                            ),
-                        }
-                    },
+                    "properties": {"evidence": {"type": "STRING"}},
                     "required": ["evidence"],
                 },
             }
         )
+
+    end_condition = resolve_stage_references(
+        str(robot.get("call_end_condition") or "").strip(), robot
+    ).strip()
+    if end_condition:
+        declarations.append(
+            {
+                "name": END_CALL_TOOL_NAME,
+                # The complete hangup condition is authored in the UI. Stage
+                # placeholders resolve only to other UI-authored conditions.
+                "description": end_condition,
+                "parameters": {
+                    "type": "OBJECT",
+                    "properties": {"reason": {"type": "STRING"}},
+                    "required": ["reason"],
+                },
+            }
+        )
     return declarations
-
-
-def build_outcome_instruction(robot: dict[str, Any]) -> str:
-    """Build deterministic prompt rules mapping conditions to tool names."""
-    configured: list[str] = []
-    for definition in CONVERSATION_OUTCOMES:
-        condition = str(robot.get(definition.condition_field) or "").strip()
-        if condition:
-            configured.append(
-                f"- {definition.label}: если выполняется условие «{condition}», "
-                f"вызови {definition.tool_name}."
-            )
-    if not configured:
-        return ""
-    return "\n".join(
-        [
-            "КЛАССИФИКАЦИЯ РЕЗУЛЬТАТА ЗВОНКА:",
-            "Постоянно анализируй разговор, но не озвучивай классификацию человеку.",
-            "Вызывай только объявленные функции. Не пиши название функции словами.",
-            "Вызывай функцию, когда условие стало достаточно ясным. Если итог разговора "
-            "позже изменился, вызови функцию нового актуального итога ещё раз; backend "
-            "сохранит последний подтверждённый итог.",
-            "Не вызывай функцию только из-за предположения или двусмысленной фразы.",
-            *configured,
-        ]
-    )
 
 
 def destination_for_outcome(

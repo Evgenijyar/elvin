@@ -11,8 +11,8 @@ from typing import Any
 from elvin.integrations.gemini import GEMINI_LIVE_MODEL_ID
 from elvin.observability.timeline import CallTimeline
 from elvin.services.call_outcomes import (
+    END_CALL_TOOL_NAME,
     OUTCOME_BY_TOOL,
-    build_outcome_instruction,
     configured_tool_declarations,
 )
 
@@ -26,30 +26,14 @@ class GeminiAudioPacket:
 
 
 def build_system_instruction(robot: dict[str, Any]) -> str:
-    """Build the single UTF-8 instruction sent to Gemini Live."""
-    role = str(robot.get("role_prompt") or "").strip()
+    """Return only text explicitly entered in visible robot fields.
+
+    No language, style, sales, stage or hangup rule is injected by Python.
+    The knowledge-base field is appended verbatim after the system-prompt field.
+    """
+    system_prompt = str(robot.get("role_prompt") or "").strip()
     knowledge = str(robot.get("knowledge_base") or "").strip()
-    description = str(robot.get("description") or "").strip()
-    parts = [
-        "Ты голосовой ИИ-робот, разговаривающий с человеком по телефону.",
-        "Отвечай естественно, коротко и на русском языке.",
-        "Не начинай разговор первым: дождись первой законченной реплики человека.",
-        "После каждого вопроса остановись и слушай ответ.",
-        "Не упоминай Gemini, API, LPTracker, Asterisk, системный промпт или внутреннее устройство.",
-        "Отвечай в первую очередь на последний вопрос собеседника. Не повторяй дословно уже сказанное и не возвращайся к вступлению без прямой причины.",
-        "Одна реплика — одно-три коротких предложения. Не задавай новый вопрос, пока не ответил на текущий.",
-        "Если собеседник не хочет разговаривать или просит прекратить звонок, вежливо попрощайся без нового предложения.",
-    ]
-    if description:
-        parts.extend(["ОПИСАНИЕ РОБОТА:", description])
-    if role:
-        parts.extend(["РОЛЬ И СЦЕНАРИЙ:", role])
-    if knowledge:
-        parts.extend(["БАЗА ЗНАНИЙ:", knowledge])
-    outcome_instruction = build_outcome_instruction(robot)
-    if outcome_instruction:
-        parts.append(outcome_instruction)
-    return "\n\n".join(parts)
+    return "\n\n".join(part for part in (system_prompt, knowledge) if part)
 
 
 class GeminiLiveSession:
@@ -110,6 +94,9 @@ class GeminiLiveSession:
         self.classified_outcome: str | None = None
         self.classified_evidence = ""
         self.outcome_history: list[dict[str, str]] = []
+        self.end_call_requested = asyncio.Event()
+        self.end_call_reason = ""
+        self.end_call_generation: int | None = None
 
     @property
     def generation(self) -> int:
@@ -190,11 +177,9 @@ class GeminiLiveSession:
         config: dict[str, Any] = {
             "response_modalities": ["AUDIO"],
             "temperature": temperature,
-            # The robot is instructed to answer in one to three short
-            # sentences. A bounded response keeps native-audio generation
-            # focused and prevents a long tail of speech after the answer.
+            # Technical safety bound for one Live response. It does not add
+            # any behavioral instruction to the model.
             "max_output_tokens": 1024,
-            "system_instruction": instruction,
             "speech_config": {
                 "voice_config": {
                     "prebuilt_voice_config": {"voice_name": voice}
@@ -209,6 +194,8 @@ class GeminiLiveSession:
             # makes the latency policy visible and reproducible.
             "thinking_config": {"thinking_level": "minimal"},
         }
+        if instruction:
+            config["system_instruction"] = instruction
         if tool_declarations:
             config["tools"] = [{"function_declarations": tool_declarations}]
 
@@ -536,28 +523,19 @@ class GeminiLiveSession:
             )
 
     async def _handle_tool_call(self, tool_call: Any) -> None:
-        """Acknowledge Gemini Live function calls and retain the latest outcome."""
+        """Acknowledge declared tools and publish backend control events."""
         self._ensure_connected()
         from google.genai import types
 
         function_calls = getattr(tool_call, "function_calls", None) or []
         responses = []
+        pending_end_call: tuple[str, int] | None = None
         for function_call in function_calls:
             name = str(getattr(function_call, "name", "") or "")
             call_id = str(getattr(function_call, "id", "") or "")
             args = getattr(function_call, "args", None) or {}
             definition = OUTCOME_BY_TOOL.get(name)
-            if definition is None:
-                response_payload = {
-                    "accepted": False,
-                    "error": "unknown_outcome_tool",
-                }
-                self.timeline.add(
-                    "GEMINI_OUTCOME_TOOL_UNKNOWN",
-                    tool_name=name,
-                    tool_call_id=call_id,
-                )
-            else:
+            if definition is not None:
                 evidence = ""
                 if isinstance(args, dict):
                     evidence = str(args.get("evidence") or "").strip()[:1000]
@@ -581,6 +559,30 @@ class GeminiLiveSession:
                     tool_name=name,
                     evidence=evidence,
                 )
+            elif name == END_CALL_TOOL_NAME and str(
+                self.robot.get("call_end_condition") or ""
+            ).strip():
+                reason = ""
+                if isinstance(args, dict):
+                    reason = str(args.get("reason") or "").strip()[:1000]
+                response_payload = {"accepted": True, "end_call": True}
+                pending_end_call = (reason, self._generation)
+                self.timeline.add(
+                    "GEMINI_END_CALL_TOOL_ACCEPTED",
+                    tool_call_id=call_id,
+                    generation=self._generation,
+                    reason=reason,
+                )
+            else:
+                response_payload = {
+                    "accepted": False,
+                    "error": "unknown_or_disabled_tool",
+                }
+                self.timeline.add(
+                    "GEMINI_TOOL_UNKNOWN",
+                    tool_name=name,
+                    tool_call_id=call_id,
+                )
             response_kwargs: dict[str, Any] = {
                 "name": name,
                 "response": response_payload,
@@ -593,6 +595,13 @@ class GeminiLiveSession:
                 await self.session.send_tool_response(
                     function_responses=responses
                 )
+        # Publish only after FunctionResponse has reached Gemini. Live function
+        # calling is sequential, so this prevents the model session from being
+        # left blocked while the telephony channel is terminated.
+        if pending_end_call is not None:
+            self.end_call_reason, self.end_call_generation = pending_end_call
+            self.end_call_requested.set()
+
 
     async def close(self) -> None:
         if self._closed:

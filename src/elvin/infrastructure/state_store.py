@@ -32,6 +32,9 @@ ROBOT_DEFAULTS: dict[str, Any] = {
     "callback_condition": "",
     "stop_list_condition": "",
     "answering_machine_condition": "",
+    "call_end_condition": "",
+    "call_end_wait_ms": 8000,
+    "call_end_delay_ms": 250,
     "ignore_short_interjections": False,
     "interjection_max_speech_ms": 650,
     "delayed_interruption": False,
@@ -236,6 +239,9 @@ class StateStore:
                 "ALTER TABLE app.robot_profiles ADD COLUMN IF NOT EXISTS callback_condition TEXT NOT NULL DEFAULT ''",
                 "ALTER TABLE app.robot_profiles ADD COLUMN IF NOT EXISTS stop_list_condition TEXT NOT NULL DEFAULT ''",
                 "ALTER TABLE app.robot_profiles ADD COLUMN IF NOT EXISTS answering_machine_condition TEXT NOT NULL DEFAULT ''",
+                "ALTER TABLE app.robot_profiles ADD COLUMN IF NOT EXISTS call_end_condition TEXT NOT NULL DEFAULT ''",
+                "ALTER TABLE app.robot_profiles ADD COLUMN IF NOT EXISTS call_end_wait_ms INTEGER NOT NULL DEFAULT 8000",
+                "ALTER TABLE app.robot_profiles ADD COLUMN IF NOT EXISTS call_end_delay_ms INTEGER NOT NULL DEFAULT 250",
                 "ALTER TABLE app.robot_profiles ADD COLUMN IF NOT EXISTS ignore_short_interjections BOOLEAN NOT NULL DEFAULT FALSE",
                 "ALTER TABLE app.robot_profiles ADD COLUMN IF NOT EXISTS interjection_max_speech_ms INTEGER NOT NULL DEFAULT 650",
                 "ALTER TABLE app.robot_profiles ADD COLUMN IF NOT EXISTS delayed_interruption BOOLEAN NOT NULL DEFAULT FALSE",
@@ -438,6 +444,7 @@ class StateStore:
                        first_phrase, lead_condition, special_condition,
                        refusal_condition, callback_condition,
                        stop_list_condition, answering_machine_condition,
+                       call_end_condition, call_end_wait_ms, call_end_delay_ms,
                        ignore_short_interjections, interjection_max_speech_ms,
                        delayed_interruption, interruption_tail_ms,
                        interruption_fade_enabled, interruption_fade_ms,
@@ -488,6 +495,9 @@ class StateStore:
             "answering_machine_condition": payload.get(
                 "answering_machine_condition", ""
             ),
+            "call_end_condition": payload.get("call_end_condition", ""),
+            "call_end_wait_ms": int(payload.get("call_end_wait_ms", 8000)),
+            "call_end_delay_ms": int(payload.get("call_end_delay_ms", 250)),
             "ignore_short_interjections": bool(
                 payload.get("ignore_short_interjections", False)
             ),
@@ -513,19 +523,21 @@ class StateStore:
                     first_phrase, lead_condition, special_condition,
                     refusal_condition, callback_condition,
                     stop_list_condition, answering_machine_condition,
+                    call_end_condition, call_end_wait_ms, call_end_delay_ms,
                     ignore_short_interjections, interjection_max_speech_ms,
                     delayed_interruption, interruption_tail_ms,
                     interruption_fade_enabled, interruption_fade_ms, active
                 ) VALUES(
                     $1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10,
                     $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-                    $21, $22
+                    $21, $22, $23, $24, $25
                 )
                 RETURNING id, name, description, model_id, voice_name,
                           temperature, role_prompt, knowledge_base,
                           first_phrase, lead_condition, special_condition,
                           refusal_condition, callback_condition,
                           stop_list_condition, answering_machine_condition,
+                          call_end_condition, call_end_wait_ms, call_end_delay_ms,
                           ignore_short_interjections,
                           interjection_max_speech_ms, delayed_interruption,
                           interruption_tail_ms,
@@ -547,6 +559,9 @@ class StateStore:
                 item["callback_condition"],
                 item["stop_list_condition"],
                 item["answering_machine_condition"],
+                item["call_end_condition"],
+                item["call_end_wait_ms"],
+                item["call_end_delay_ms"],
                 item["ignore_short_interjections"],
                 item["interjection_max_speech_ms"],
                 item["delayed_interruption"],
@@ -576,18 +591,20 @@ class StateStore:
                     first_phrase=$9, lead_condition=$10, special_condition=$11,
                     refusal_condition=$12, callback_condition=$13,
                     stop_list_condition=$14, answering_machine_condition=$15,
-                    ignore_short_interjections=$16,
-                    interjection_max_speech_ms=$17,
-                    delayed_interruption=$18, interruption_tail_ms=$19,
-                    interruption_fade_enabled=$20,
-                    interruption_fade_ms=$21,
-                    active=$22, updated_at=NOW()
+                    call_end_condition=$16, call_end_wait_ms=$17,
+                    call_end_delay_ms=$18, ignore_short_interjections=$19,
+                    interjection_max_speech_ms=$20,
+                    delayed_interruption=$21, interruption_tail_ms=$22,
+                    interruption_fade_enabled=$23,
+                    interruption_fade_ms=$24,
+                    active=$25, updated_at=NOW()
                 WHERE id=$1::uuid
                 RETURNING id, name, description, model_id, voice_name,
                           temperature, role_prompt, knowledge_base,
                           first_phrase, lead_condition, special_condition,
                           refusal_condition, callback_condition,
                           stop_list_condition, answering_machine_condition,
+                          call_end_condition, call_end_wait_ms, call_end_delay_ms,
                           ignore_short_interjections,
                           interjection_max_speech_ms, delayed_interruption,
                           interruption_tail_ms,
@@ -609,6 +626,9 @@ class StateStore:
                 payload.get("callback_condition", ""),
                 payload.get("stop_list_condition", ""),
                 payload.get("answering_machine_condition", ""),
+                payload.get("call_end_condition", ""),
+                int(payload.get("call_end_wait_ms", 8000)),
+                int(payload.get("call_end_delay_ms", 250)),
                 bool(payload.get("ignore_short_interjections", False)),
                 int(payload.get("interjection_max_speech_ms", 650)),
                 bool(payload.get("delayed_interruption", False)),
@@ -646,6 +666,13 @@ class StateStore:
                     "stop_list_condition": payload.get("stop_list_condition", ""),
                     "answering_machine_condition": payload.get(
                         "answering_machine_condition", ""
+                    ),
+                    "call_end_condition": payload.get("call_end_condition", ""),
+                    "call_end_wait_ms": int(
+                        payload.get("call_end_wait_ms", 8000)
+                    ),
+                    "call_end_delay_ms": int(
+                        payload.get("call_end_delay_ms", 250)
                     ),
                     "ignore_short_interjections": bool(
                         payload.get("ignore_short_interjections", False)

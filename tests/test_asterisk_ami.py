@@ -16,7 +16,7 @@ def test_ami_sets_websocket_rx_gain_and_resets_it() -> None:
             writer.write(b"Asterisk Call Manager/10.0.0\r\n")
             await writer.drain()
             try:
-                while len(received) < 3:
+                while len(received) < 4:
                     message: dict[str, str] = {}
                     while True:
                         line = await reader.readline()
@@ -51,6 +51,7 @@ def test_ami_sets_websocket_rx_gain_and_resets_it() -> None:
         try:
             await client.set_channel_rx_gain("WebSocket/elvin/1", 0.5)
             await client.set_channel_rx_gain("WebSocket/elvin/1", 1.0)
+            await client.hangup_channel("WebSocket/elvin/1")
             await asyncio.wait_for(completed.wait(), timeout=1.0)
         finally:
             await client.close()
@@ -69,3 +70,9 @@ def test_ami_sets_websocket_rx_gain_and_resets_it() -> None:
         "Value": "-2.000000",
     }
     assert received[2]["Value"] == "0"
+    assert received[3] == {
+        "Action": "Hangup",
+        "ActionID": "elvin-4",
+        "Channel": "WebSocket/elvin/1",
+        "Cause": "16",
+    }

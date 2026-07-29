@@ -24,16 +24,17 @@ def test_short_speech_fragments_are_not_closed_as_turns() -> None:
     assert "echo_suppressed" in text
 
 
-def test_gemini_instruction_is_valid_russian_utf8() -> None:
+def test_gemini_instruction_contains_only_visible_user_text() -> None:
     from elvin.integrations.gemini_live import build_system_instruction
 
     instruction = build_system_instruction(
         {
-            "description": "описание",
+            "description": "описание только для интерфейса",
             "role_prompt": "роль",
             "knowledge_base": "знания",
         }
     )
-    assert "Ты голосовой ИИ-робот" in instruction
-    assert "ОПИСАНИЕ РОБОТА:" in instruction
+    assert instruction == "роль\n\nзнания"
+    assert "описание только для интерфейса" not in instruction
+    assert "Ты голосовой ИИ-робот" not in instruction
     assert "РўС‹" not in instruction

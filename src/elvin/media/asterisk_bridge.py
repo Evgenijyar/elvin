@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from fastapi import WebSocket
-from starlette.websockets import WebSocketDisconnect
+from starlette.websockets import WebSocketDisconnect, WebSocketState
 
 from elvin.integrations.asterisk_ami import AsteriskAmiClient
 from elvin.media.audio import Pcm24To16Resampler, PlaybackEchoGuard
@@ -209,9 +209,16 @@ class AsteriskGeminiBridge:
         self.asterisk_ami = self._create_asterisk_ami_client()
         self._voice_fade_task: asyncio.Task[None] | None = None
         self._voice_gain_reset_task: asyncio.Task[None] | None = None
+        self._playback_completed_generation = -1
+        self._playback_completion_event = asyncio.Event()
+        self._robot_hangup_in_progress = False
 
     def _create_asterisk_ami_client(self) -> AsteriskAmiClient | None:
-        if self.interruption_policy.effective_fade_ms <= 0:
+        needs_fade = self.interruption_policy.effective_fade_ms > 0
+        needs_hangup = bool(
+            str(self.call.robot.get("call_end_condition") or "").strip()
+        )
+        if not needs_fade and not needs_hangup:
             return None
         app = getattr(self.websocket, "app", None)
         state = getattr(app, "state", None)
@@ -256,6 +263,13 @@ class AsteriskGeminiBridge:
             name=f"asterisk-playback-monitor-{self.call.identity.call_id}",
         )
         tasks = {input_task, output_task, monitor_task}
+        end_call_task: asyncio.Task[str] | None = None
+        if str(self.call.robot.get("call_end_condition") or "").strip():
+            end_call_task = asyncio.create_task(
+                self._end_call_monitor(),
+                name=f"asterisk-end-call-{self.call.identity.call_id}",
+            )
+            tasks.add(end_call_task)
         if self.background_audio is not None:
             background_task = asyncio.create_task(
                 self._background_loop(),
@@ -271,7 +285,11 @@ class AsteriskGeminiBridge:
                 exception = task.exception()
                 if exception is not None:
                     raise exception
-            if input_task in done:
+            if end_call_task is not None and end_call_task in done:
+                result = end_call_task.result()
+            elif self._robot_hangup_in_progress:
+                result = "robot_hangup"
+            elif input_task in done:
                 result = input_task.result()
             else:
                 result = "media_task_finished"
@@ -805,6 +823,120 @@ class AsteriskGeminiBridge:
                 error=f"{type(exc).__name__}: {exc}",
             )
 
+    async def _end_call_monitor(self) -> str:
+        """Wait for Gemini's visible ``end_call`` tool and hang up safely."""
+        await self.call.gemini.end_call_requested.wait()
+        requested_generation = self.call.gemini.end_call_generation
+        if requested_generation is None:
+            requested_generation = self.call.gemini.generation
+        configured_wait_ms = self.call.robot.get("call_end_wait_ms")
+        configured_delay_ms = self.call.robot.get("call_end_delay_ms")
+        wait_ms = max(
+            0,
+            min(
+                int(8000 if configured_wait_ms is None else configured_wait_ms),
+                30_000,
+            ),
+        )
+        delay_ms = max(
+            0,
+            min(
+                int(250 if configured_delay_ms is None else configured_delay_ms),
+                5000,
+            ),
+        )
+        self.call.timeline.add(
+            "ROBOT_END_CALL_REQUESTED",
+            generation=requested_generation,
+            reason=self.call.gemini.end_call_reason,
+            playback_wait_ms=wait_ms,
+            delay_ms=delay_ms,
+        )
+
+        if wait_ms > 0:
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + wait_ms / 1000.0
+            while (
+                self._playback_completed_generation < requested_generation
+                and loop.time() < deadline
+            ):
+                self._playback_completion_event.clear()
+                if self._playback_completed_generation >= requested_generation:
+                    break
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    break
+                try:
+                    await asyncio.wait_for(
+                        self._playback_completion_event.wait(),
+                        timeout=remaining,
+                    )
+                except TimeoutError:
+                    break
+
+        playback_confirmed = (
+            self._playback_completed_generation >= requested_generation
+        )
+        if delay_ms > 0:
+            await asyncio.sleep(delay_ms / 1000.0)
+        await self._hangup_current_channel(
+            reason=self.call.gemini.end_call_reason,
+            playback_confirmed=playback_confirmed,
+        )
+        return "robot_hangup"
+
+    async def _hangup_current_channel(
+        self,
+        *,
+        reason: str,
+        playback_confirmed: bool,
+    ) -> None:
+        """Ask chan_websocket to hang up, with AMI and socket fallbacks."""
+        self._robot_hangup_in_progress = True
+        channel = self.protocol.info.channel
+        websocket_command_success = False
+        ami_success = False
+
+        try:
+            # This is the native chan_websocket control command: Asterisk
+            # hangs up this media channel and closes the WebSocket itself.
+            await self.protocol.command("HANGUP")
+            websocket_command_success = True
+        except Exception as exc:
+            self.call.timeline.add(
+                "ROBOT_END_CALL_WEBSOCKET_COMMAND_ERROR",
+                channel=channel,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            ami = self.asterisk_ami
+            if ami is not None and channel:
+                try:
+                    await ami.hangup_channel(channel, cause=16)
+                    ami_success = True
+                except Exception as ami_exc:
+                    self.call.timeline.add(
+                        "ROBOT_END_CALL_AMI_ERROR",
+                        channel=channel,
+                        error=f"{type(ami_exc).__name__}: {ami_exc}",
+                    )
+                    logger.exception(
+                        "Unable to hang up Asterisk channel through AMI"
+                    )
+
+        self.call.timeline.add(
+            "ROBOT_END_CALL_EXECUTED",
+            channel=channel,
+            reason=reason,
+            playback_confirmed=playback_confirmed,
+            websocket_command_success=websocket_command_success,
+            ami_success=ami_success,
+        )
+        if self.websocket.application_state != WebSocketState.DISCONNECTED:
+            try:
+                await self.websocket.close(code=1000)
+            except RuntimeError:
+                pass
+
     async def _send_audio_to_gemini(self, pcm16: bytes) -> None:
         """Send input in 20–40 ms chunks, including buffered pre-roll."""
         if not pcm16:
@@ -1114,5 +1246,9 @@ class AsteriskGeminiBridge:
                         confirmed=False,
                     )
                 self.call.detector.set_bot_speaking(False)
+                self._playback_completed_generation = max(
+                    self._playback_completed_generation, generation
+                )
+                self._playback_completion_event.set()
             finally:
                 self.call.gemini.turn_complete_queue.task_done()

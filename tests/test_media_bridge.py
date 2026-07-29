@@ -15,11 +15,24 @@ from elvin.media.turn_detector import TurnDecision
 
 
 class _FakeWebSocket:
+    def __init__(self) -> None:
+        from starlette.websockets import WebSocketState
+
+        self.application_state = WebSocketState.CONNECTED
+        self.closed = False
+
     async def send_bytes(self, _payload: bytes) -> None:
         return None
 
     async def send_text(self, _payload: str) -> None:
         return None
+
+    async def close(self, code: int = 1000) -> None:
+        from starlette.websockets import WebSocketState
+
+        assert code == 1000
+        self.closed = True
+        self.application_state = WebSocketState.DISCONNECTED
 
 
 class _FakeTimeline:
@@ -659,3 +672,122 @@ def test_short_interjection_during_playback_never_reaches_gemini() -> None:
 
 async def _async_noop(*_args: object, **_kwargs: object) -> None:
     return None
+
+
+def test_end_call_waits_for_playback_then_hangs_up_channel() -> None:
+    timeline = _FakeTimeline()
+    websocket = _FakeWebSocket()
+    hangups: list[tuple[str, int]] = []
+
+    class _FakeAmi:
+        async def hangup_channel(self, channel: str, cause: int = 16) -> None:
+            hangups.append((channel, cause))
+
+    gemini = SimpleNamespace(
+        end_call_requested=asyncio.Event(),
+        end_call_generation=3,
+        end_call_reason="Все попрощались",
+        generation=3,
+    )
+    gemini.end_call_requested.set()
+    bridge = object.__new__(AsteriskGeminiBridge)
+    bridge.websocket = websocket
+    bridge.call = SimpleNamespace(
+        gemini=gemini,
+        robot={"call_end_wait_ms": 1000, "call_end_delay_ms": 0},
+        timeline=timeline,
+    )
+    bridge.protocol = SimpleNamespace(
+        info=AsteriskMediaInfo(channel="WebSocket/elvin/1")
+    )
+    bridge.asterisk_ami = _FakeAmi()
+    bridge._playback_completed_generation = 3
+    bridge._playback_completion_event = asyncio.Event()
+
+    result = asyncio.run(bridge._end_call_monitor())
+
+    assert result == "robot_hangup"
+    assert hangups == [("WebSocket/elvin/1", 16)]
+    assert websocket.closed
+    assert any(
+        name == "ROBOT_END_CALL_EXECUTED"
+        and payload["playback_confirmed"] is True
+        and payload["ami_success"] is True
+        for name, payload in timeline.events
+    )
+
+
+def test_end_call_falls_back_to_websocket_close_without_ami() -> None:
+    timeline = _FakeTimeline()
+    websocket = _FakeWebSocket()
+    gemini = SimpleNamespace(
+        end_call_requested=asyncio.Event(),
+        end_call_generation=1,
+        end_call_reason="Завершение",
+        generation=1,
+    )
+    gemini.end_call_requested.set()
+    bridge = object.__new__(AsteriskGeminiBridge)
+    bridge.websocket = websocket
+    bridge.call = SimpleNamespace(
+        gemini=gemini,
+        robot={"call_end_wait_ms": 0, "call_end_delay_ms": 0},
+        timeline=timeline,
+    )
+    bridge.protocol = SimpleNamespace(info=AsteriskMediaInfo(channel=""))
+    bridge.asterisk_ami = None
+    bridge._playback_completed_generation = -1
+    bridge._playback_completion_event = asyncio.Event()
+
+    assert asyncio.run(bridge._end_call_monitor()) == "robot_hangup"
+    assert websocket.closed
+
+
+def test_end_call_prefers_native_chan_websocket_hangup_command() -> None:
+    timeline = _FakeTimeline()
+    websocket = _FakeWebSocket()
+    commands: list[str] = []
+    ami_calls: list[str] = []
+
+    class _Protocol:
+        info = AsteriskMediaInfo(channel="WebSocket/elvin/2")
+
+        async def command(self, name: str, **_parameters: object) -> None:
+            commands.append(name)
+
+    class _FakeAmi:
+        async def hangup_channel(self, channel: str, cause: int = 16) -> None:
+            ami_calls.append(f"{channel}:{cause}")
+
+    gemini = SimpleNamespace(
+        end_call_requested=asyncio.Event(),
+        end_call_generation=5,
+        end_call_reason="Финальная фраза произнесена",
+        generation=5,
+    )
+    gemini.end_call_requested.set()
+    bridge = object.__new__(AsteriskGeminiBridge)
+    bridge.websocket = websocket
+    bridge.call = SimpleNamespace(
+        gemini=gemini,
+        robot={"call_end_wait_ms": 0, "call_end_delay_ms": 0},
+        timeline=timeline,
+    )
+    bridge.protocol = _Protocol()
+    bridge.asterisk_ami = _FakeAmi()
+    bridge._playback_completed_generation = 5
+    bridge._playback_completion_event = asyncio.Event()
+    bridge._robot_hangup_in_progress = False
+
+    started = __import__("time").monotonic()
+    assert asyncio.run(bridge._end_call_monitor()) == "robot_hangup"
+    assert __import__("time").monotonic() - started < 0.15
+    assert commands == ["HANGUP"]
+    assert ami_calls == []
+    assert bridge._robot_hangup_in_progress is True
+    assert any(
+        name == "ROBOT_END_CALL_EXECUTED"
+        and payload["websocket_command_success"] is True
+        and payload["ami_success"] is False
+        for name, payload in timeline.events
+    )

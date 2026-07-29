@@ -1,8 +1,9 @@
 """Minimal asynchronous Asterisk Manager Interface client.
 
-Only the authenticated ``Setvar`` action needed for real-time channel gain is
-implemented. AMI events are disabled during login so command responses remain
-strictly serialized and no background reader is required.
+Only the authenticated actions needed for real-time channel gain and an
+explicit robot-requested channel hangup are implemented. AMI events are
+disabled during login so command responses remain strictly serialized and no
+background reader is required.
 """
 
 from __future__ import annotations
@@ -34,6 +35,19 @@ class AsteriskAmiClient:
         self._writer: asyncio.StreamWriter | None = None
         self._lock = asyncio.Lock()
         self._action_sequence = 0
+
+    async def hangup_channel(self, channel: str, cause: int = 16) -> None:
+        """Hang up the exact active Asterisk channel through AMI."""
+        if not channel:
+            raise AsteriskAmiError("Asterisk channel is not available")
+        bounded_cause = max(1, min(int(cause), 127))
+        await self.action(
+            "Hangup",
+            {
+                "Channel": channel,
+                "Cause": str(bounded_cause),
+            },
+        )
 
     async def set_channel_rx_gain(self, channel: str, gain: float) -> None:
         """Apply linear gain to media read from the WebSocket channel.

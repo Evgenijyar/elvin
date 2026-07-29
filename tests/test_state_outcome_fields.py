@@ -31,8 +31,16 @@ def test_local_store_persists_assignment_outcome_configuration(tmp_path: Path) -
                 "name": "Тест",
                 "model_id": "gemini-3.1-flash-live-preview",
                 "voice_name": "Kore",
+                "call_end_condition": "После прощания вызови end_call",
+                "call_end_wait_ms": 9000,
+                "call_end_delay_ms": 400,
             }
         )
+        loaded_robot = await store.get_robot(robot["id"])
+        assert loaded_robot is not None
+        assert loaded_robot["call_end_condition"] == "После прощания вызови end_call"
+        assert loaded_robot["call_end_wait_ms"] == 9000
+        assert loaded_robot["call_end_delay_ms"] == 400
         assignment = await store.create_assignment(
             {
                 "project_id": 1,

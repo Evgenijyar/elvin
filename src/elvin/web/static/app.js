@@ -92,6 +92,20 @@ function bindEvents() {
     $("#robotInterruptionTailMs").addEventListener("input", renderInterruptionEffects);
     $("#robotInterruptionFadeEnabled").addEventListener("change", renderInterruptionEffects);
     $("#robotInterruptionFadeMs").addEventListener("input", renderInterruptionEffects);
+    [
+        "#robotRole",
+        "#robotKnowledge",
+        "#robotLeadCondition",
+        "#robotSpecialCondition",
+        "#robotRefusalCondition",
+        "#robotCallbackCondition",
+        "#robotStopListCondition",
+        "#robotAnsweringMachineCondition",
+        "#robotCallEndCondition",
+    ].forEach((selector) => $(selector).addEventListener("input", renderPromptConfiguration));
+    $$('[data-stage-reference]').forEach((button) => {
+        button.addEventListener("click", () => insertStageReference(button.dataset.stageReference));
+    });
     $("#openAssignmentModal").addEventListener("click", openAssignmentModal);
     $$('[data-open-assignment]').forEach((button) => button.addEventListener("click", openAssignmentModal));
     $$('[data-close-modal]').forEach((button) => button.addEventListener("click", closeAssignmentModal));
@@ -880,6 +894,9 @@ function renderRobotEditor() {
     $("#robotCallbackCondition").value = robot.callback_condition || "";
     $("#robotStopListCondition").value = robot.stop_list_condition || "";
     $("#robotAnsweringMachineCondition").value = robot.answering_machine_condition || "";
+    $("#robotCallEndCondition").value = robot.call_end_condition || "";
+    $("#robotCallEndWaitMs").value = robot.call_end_wait_ms ?? 8000;
+    $("#robotCallEndDelayMs").value = robot.call_end_delay_ms ?? 250;
     $("#robotIgnoreShortInterjections").checked = Boolean(robot.ignore_short_interjections);
     $("#robotInterjectionMaxSpeechMs").value = robot.interjection_max_speech_ms ?? 650;
     $("#robotDelayedInterruption").checked = Boolean(robot.delayed_interruption);
@@ -888,6 +905,7 @@ function renderRobotEditor() {
     $("#robotInterruptionFadeMs").value = robot.interruption_fade_ms ?? 200;
     renderTemperature();
     renderInterruptionEffects();
+    renderPromptConfiguration();
     const key = $("#geminiKeyStatus");
     key.textContent = state.gemini?.configured
         ? "✓ Gemini API key настроен"
@@ -918,6 +936,69 @@ function renderInterruptionEffects() {
     $("#interruptionFadeValue").textContent = `${fadeMs} мс`;
 }
 
+const STAGE_REFERENCE_FIELDS = {
+    lead: { label: "Лид", selector: "#robotLeadCondition", tool: "mark_call_as_lead" },
+    special: { label: "Спецстадия", selector: "#robotSpecialCondition", tool: "mark_call_as_special" },
+    refusal: { label: "Отказ", selector: "#robotRefusalCondition", tool: "mark_call_as_refusal" },
+    callback: { label: "Перезвонить", selector: "#robotCallbackCondition", tool: "mark_call_as_callback" },
+    stop_list: { label: "Стоп-лист", selector: "#robotStopListCondition", tool: "mark_call_as_stop_list" },
+    answering_machine: { label: "Автоответчик", selector: "#robotAnsweringMachineCondition", tool: "mark_call_as_answering_machine" },
+};
+
+function resolveStageReferences(value) {
+    return String(value || "").replace(/\{\{stage:([a-z_]+)\}\}/g, (token, key) => {
+        const definition = STAGE_REFERENCE_FIELDS[key];
+        if (!definition) return token;
+        const condition = $(definition.selector).value.trim();
+        return condition || token;
+    });
+}
+
+function insertStageReference(key) {
+    const textarea = $("#robotCallEndCondition");
+    const token = `{{stage:${key}}}`;
+    const start = textarea.selectionStart ?? textarea.value.length;
+    const end = textarea.selectionEnd ?? start;
+    const prefix = textarea.value.slice(0, start);
+    const suffix = textarea.value.slice(end);
+    const spacerBefore = prefix && !/\s$/.test(prefix) ? " " : "";
+    const spacerAfter = suffix && !/^\s/.test(suffix) ? " " : "";
+    textarea.value = `${prefix}${spacerBefore}${token}${spacerAfter}${suffix}`;
+    const cursor = prefix.length + spacerBefore.length + token.length;
+    textarea.focus();
+    textarea.setSelectionRange(cursor, cursor);
+    renderPromptConfiguration();
+}
+
+function renderPromptConfiguration() {
+    const systemPrompt = $("#robotRole").value.trim();
+    const knowledge = $("#robotKnowledge").value.trim();
+    const systemInstruction = [systemPrompt, knowledge].filter(Boolean).join("\n\n");
+    const endConditionRaw = $("#robotCallEndCondition").value.trim();
+    const endConditionResolved = resolveStageReferences(endConditionRaw);
+    $("#robotCallEndResolved").value = endConditionResolved;
+
+    const lines = [
+        "SYSTEM_INSTRUCTION",
+        systemInstruction || "(не задана — system_instruction не отправляется)",
+        "",
+        "TOOLS",
+    ];
+    let configured = 0;
+    Object.values(STAGE_REFERENCE_FIELDS).forEach((definition) => {
+        const condition = $(definition.selector).value.trim();
+        if (!condition) return;
+        configured += 1;
+        lines.push(`${definition.tool}:`, condition, "");
+    });
+    if (endConditionResolved) {
+        configured += 1;
+        lines.push("end_call:", endConditionResolved, "");
+    }
+    if (!configured) lines.push("(tools не настроены)");
+    $("#robotPromptPreview").textContent = lines.join("\n").trimEnd();
+}
+
 async function createRobot() {
     try {
         const result = await api("/api/robots", {
@@ -937,6 +1018,9 @@ async function createRobot() {
                 callback_condition: "",
                 stop_list_condition: "",
                 answering_machine_condition: "",
+                call_end_condition: "",
+                call_end_wait_ms: 8000,
+                call_end_delay_ms: 250,
                 ignore_short_interjections: false,
                 interjection_max_speech_ms: 650,
                 delayed_interruption: false,
@@ -973,6 +1057,9 @@ async function saveRobot(event) {
         callback_condition: $("#robotCallbackCondition").value,
         stop_list_condition: $("#robotStopListCondition").value,
         answering_machine_condition: $("#robotAnsweringMachineCondition").value,
+        call_end_condition: $("#robotCallEndCondition").value,
+        call_end_wait_ms: Number($("#robotCallEndWaitMs").value),
+        call_end_delay_ms: Number($("#robotCallEndDelayMs").value),
         ignore_short_interjections: $("#robotIgnoreShortInterjections").checked,
         interjection_max_speech_ms: Number($("#robotInterjectionMaxSpeechMs").value),
         delayed_interruption: $("#robotDelayedInterruption").checked,

@@ -556,3 +556,93 @@ button:disabled {
     .call-time-cell { grid-column: 2; }
     .call-card-details { padding: 0 14px 14px; }
 }
+
+.call-end-editor {
+    margin-top: 22px;
+    padding: 20px;
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    background: rgba(125, 140, 255, .045);
+}
+.call-end-heading h3,
+.prompt-preview-panel h3 {
+    margin: 0 0 7px;
+    font-size: 17px;
+}
+.call-end-heading p { margin: 0 0 18px; line-height: 1.55; }
+.call-end-editor code {
+    padding: 2px 6px;
+    border-radius: 6px;
+    background: rgba(125, 140, 255, .12);
+    color: #d9dcff;
+}
+.stage-reference-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    margin: 12px 0 16px;
+}
+.stage-reference-row > span {
+    margin-right: 4px;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 700;
+}
+.reference-chip {
+    min-height: 30px;
+    padding: 5px 10px;
+    border: 1px solid rgba(125, 140, 255, .24);
+    border-radius: 999px;
+    background: rgba(125, 140, 255, .08);
+    color: #dfe2ff;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: transform .14s ease, background-color .14s ease, border-color .14s ease;
+}
+.reference-chip:hover {
+    border-color: rgba(125, 140, 255, .5);
+    background: rgba(125, 140, 255, .16);
+    transform: translateY(-1px);
+}
+.reference-chip:active { transform: translateY(1px) scale(.98); }
+.call-end-timing-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+    margin-bottom: 14px;
+}
+#robotCallEndResolved {
+    min-height: 150px;
+    color: #bec5d6;
+    background: #0b0f16;
+}
+.prompt-preview-panel {
+    padding: 4px 0;
+}
+#robotPromptPreview {
+    min-height: 430px;
+    max-height: 680px;
+    overflow: auto;
+    margin: 16px 0 0;
+    padding: 18px;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: #0b0f16;
+    color: #dfe3ed;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+    line-height: 1.65;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+.tab-pane label small {
+    display: block;
+    margin: 6px 0 9px;
+    color: var(--muted);
+    line-height: 1.45;
+}
+@media (max-width: 760px) {
+    .call-end-timing-grid { grid-template-columns: 1fr; }
+}

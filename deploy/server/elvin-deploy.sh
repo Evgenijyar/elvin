@@ -96,7 +96,7 @@ deploy/server/elvin-disable-persistence.sh
 # Asterisk AMI intentionally listens on host loopback only. Expose it solely
 # on the Docker bridge through a systemd socket proxy, never on a public
 # interface. The backend uses this real-time control path only for the optional
-# interruption-tail voice fade.
+# interruption-tail voice fade and an explicit robot-requested hangup.
 install -m 0644 deploy/server/elvin-ami-proxy.socket \
   /etc/systemd/system/elvin-ami-proxy.socket
 install -m 0644 deploy/server/elvin-ami-proxy.service \

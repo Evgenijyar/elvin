@@ -187,3 +187,66 @@ def test_conversation_transcript_orders_caller_and_elvin_turns() -> None:
         "Элвин: Второй ответ\n\n"
         "Элвин: Финальная реплика"
     )
+
+
+def test_end_call_tool_is_acknowledged_before_request_is_published(monkeypatch) -> None:
+    import sys
+    from types import ModuleType
+
+    order: list[str] = []
+
+    class _FunctionResponse:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+    types_module = SimpleNamespace(FunctionResponse=_FunctionResponse)
+    genai_module = ModuleType("google.genai")
+    genai_module.types = types_module
+    google_module = ModuleType("google")
+    google_module.genai = genai_module
+    monkeypatch.setitem(sys.modules, "google", google_module)
+    monkeypatch.setitem(sys.modules, "google.genai", genai_module)
+
+    class _LiveSession:
+        async def send_tool_response(self, *, function_responses: list[object]) -> None:
+            assert function_responses[0].kwargs["name"] == "end_call"
+            assert not session.end_call_requested.is_set()
+            order.append("response")
+
+    session = object.__new__(GeminiLiveSession)
+    session.session = _LiveSession()
+    session._closed = False
+    session._send_lock = asyncio.Lock()
+    session.receive_error = None
+    session.timeline = _Timeline()
+    session.robot = {"call_end_condition": "После прощания вызови end_call"}
+    session._generation = 4
+    session.classified_outcome = None
+    session.classified_evidence = ""
+    session.outcome_history = []
+    session.end_call_requested = asyncio.Event()
+    session.end_call_reason = ""
+    session.end_call_generation = None
+
+    async def exercise() -> None:
+        await session._handle_response(
+            SimpleNamespace(
+                tool_call=SimpleNamespace(
+                    function_calls=[
+                        SimpleNamespace(
+                            name="end_call",
+                            id="tool-end",
+                            args={"reason": "Разговор завершён"},
+                        )
+                    ]
+                ),
+                server_content=None,
+            )
+        )
+        order.append("published")
+
+    asyncio.run(exercise())
+    assert order == ["response", "published"]
+    assert session.end_call_requested.is_set()
+    assert session.end_call_reason == "Разговор завершён"
+    assert session.end_call_generation == 4
