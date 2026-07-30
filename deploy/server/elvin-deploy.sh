@@ -132,8 +132,16 @@ include_line='#include extensions.d/elvin-telephony-test.conf'
 grep -Fqx "$include_line" "$extensions_file" \
   || printf '\n%s\n' "$include_line" >> "$extensions_file"
 asterisk -rx "dialplan reload" >/dev/null
-dialplan_output="$(asterisk -rx "dialplan show elvin-telephony-test")"
-grep -Fq "Elvin isolated telephony test" <<<"$dialplan_output" \
+dialplan_loaded=false
+for _attempt in $(seq 1 10); do
+  dialplan_output="$(asterisk -rx "dialplan show elvin-telephony-test")"
+  if grep -Fq "Elvin isolated telephony test" <<<"$dialplan_output"; then
+    dialplan_loaded=true
+    break
+  fi
+  sleep 0.2
+done
+[[ "$dialplan_loaded" == true ]] \
   || die "isolated telephony-test dialplan was not loaded"
 
 if grep -Eqi 'applied-caas|internal\.api\.openai' uv.lock; then
