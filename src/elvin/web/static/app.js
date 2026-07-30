@@ -18,6 +18,9 @@ const state = {
     callHistoryRequestId: 0,
     expandedCallId: null,
     callHistoryFiltersInitialized: false,
+    telephonyTestId: null,
+    telephonyTestPollTimer: null,
+    telephonyTestConfigured: false,
 };
 
 const CALL_HISTORY_FILTERS_SESSION_KEY = "elvin.callHistoryFilters.v1";
@@ -127,6 +130,7 @@ function bindEvents() {
     $("#callDateTo").addEventListener("change", saveCallHistoryFilterSelection);
     $("#callPhoneSearch").addEventListener("input", saveCallHistoryFilterSelection);
     $("#loadMoreCalls").addEventListener("click", () => void loadCallHistory({ append: true }));
+    $("#telephonyTestForm").addEventListener("submit", startTelephonyTest);
     $$(".nav-button").forEach((button) => {
         button.addEventListener("click", () => switchPage(button.dataset.page));
     });
@@ -175,6 +179,10 @@ async function handleLogout() {
     state.callHistoryRequestId = 0;
     state.expandedCallId = null;
     state.callHistoryFiltersInitialized = false;
+    state.telephonyTestId = null;
+    state.telephonyTestConfigured = false;
+    if (state.telephonyTestPollTimer) clearTimeout(state.telephonyTestPollTimer);
+    state.telephonyTestPollTimer = null;
     showLogin();
 }
 
@@ -260,7 +268,149 @@ function switchPage(page) {
     } else if (page === "history") {
         initializeCallHistoryFilters();
         if (!state.callHistoryLoaded) void loadCallHistory();
+    } else if (page === "telephonyTest") {
+        void loadTelephonyTestAvailability();
+        if (state.telephonyTestId) void pollTelephonyTest();
     }
+}
+
+const TELEPHONY_TEST_STATUS_LABELS = {
+    queued: "В очереди",
+    connecting: "Подключение к AMI",
+    dialing: "Набор номера",
+    ringing: "Вызов абонента",
+    answered: "Абонент ответил",
+    playing: "Проигрывается файл",
+    completed: "Файл проигран",
+    ended: "Звонок завершён",
+    failed: "Ошибка",
+    cancelled: "Отменён",
+};
+
+const TELEPHONY_TEST_EVENT_LABELS = {
+    TEST_CREATED: "Тест создан",
+    AMI_CONNECT_START: "Подключение к Asterisk AMI",
+    AMI_CONNECTED: "AMI-соединение установлено",
+    AMI_AUTHENTICATED: "AMI-аутентификация успешна",
+    ORIGINATE_SENT: "Команда Originate отправлена",
+    ORIGINATE_ACTION_RESPONSE: "Asterisk принял команду Originate",
+    ORIGINATE_RESPONSE: "Получен итог Originate",
+    SIP_CHANNEL_STATE: "Изменение состояния SIP-канала",
+    AMI_NEWCHANNEL: "Создан SIP-канал",
+    AMI_DIALBEGIN: "Начат набор через LPTracker",
+    AMI_DIALEND: "Набор завершён",
+    DIALPLAN_ANSWERED: "Абонент ответил — запущен тестовый dialplan",
+    DIALPLAN_PLAYBACK_STARTED: "Начато проигрывание файла",
+    DIALPLAN_PLAYBACK_FINISHED: "Проигрывание файла завершено",
+    AMI_HANGUPREQUEST: "Запрошено завершение канала",
+    AMI_HANGUP: "SIP-канал завершён",
+    TEST_TIMEOUT: "Истекло время ожидания",
+    TEST_ERROR: "Ошибка теста",
+    TEST_CANCELLED: "Тест остановлен",
+    TEST_RESOURCE_CLEANUP: "Временный аудиофайл удалён",
+};
+
+async function loadTelephonyTestAvailability() {
+    const badge = $("#telephonyTestAvailability");
+    try {
+        const result = await api("/api/telephony-test/status");
+        state.telephonyTestConfigured = Boolean(result.configured);
+        badge.textContent = result.configured ? "AMI READY" : "AMI НЕ НАСТРОЕН";
+        badge.classList.toggle("error", !result.configured);
+        $("#startTelephonyTestButton").disabled = !result.configured;
+    } catch (error) {
+        state.telephonyTestConfigured = false;
+        badge.textContent = "AMI НЕДОСТУПЕН";
+        badge.classList.add("error");
+        $("#startTelephonyTestButton").disabled = true;
+        $("#telephonyTestMessage").textContent = error.message;
+    }
+}
+
+async function startTelephonyTest(event) {
+    event.preventDefault();
+    const button = $("#startTelephonyTestButton");
+    const message = $("#telephonyTestMessage");
+    const file = $("#telephonyTestAudio").files[0];
+    if (!file) {
+        message.textContent = "Выберите аудиофайл.";
+        return;
+    }
+    const form = new FormData();
+    form.append("phone", $("#telephonyTestPhone").value.trim());
+    form.append("file", file);
+    button.disabled = true;
+    button.textContent = "Готовим и звоним…";
+    message.textContent = "Загружаем и преобразуем аудиофайл…";
+    message.classList.remove("success");
+    try {
+        const result = await api("/api/telephony-test/calls", {
+            method: "POST",
+            body: form,
+        });
+        state.telephonyTestId = result.call.test_id;
+        message.textContent = "Команда отправлена в Asterisk.";
+        message.classList.add("success");
+        renderTelephonyTest(result.call);
+        void pollTelephonyTest();
+    } catch (error) {
+        message.textContent = error.message;
+        showToast(error.message, true);
+        button.disabled = !state.telephonyTestConfigured;
+    } finally {
+        button.textContent = "Позвонить";
+    }
+}
+
+async function pollTelephonyTest() {
+    if (!state.telephonyTestId || !state.authenticated) return;
+    if (state.telephonyTestPollTimer) clearTimeout(state.telephonyTestPollTimer);
+    try {
+        const result = await api(`/api/telephony-test/calls/${state.telephonyTestId}`);
+        renderTelephonyTest(result.call);
+        if (!result.call.terminal) {
+            state.telephonyTestPollTimer = setTimeout(() => void pollTelephonyTest(), 750);
+        } else {
+            state.telephonyTestPollTimer = null;
+            $("#startTelephonyTestButton").disabled = !state.telephonyTestConfigured;
+        }
+    } catch (error) {
+        $("#telephonyTestMessage").textContent = error.message;
+        state.telephonyTestPollTimer = null;
+        $("#startTelephonyTestButton").disabled = !state.telephonyTestConfigured;
+    }
+}
+
+function renderTelephonyTest(call) {
+    if (!call) return;
+    $("#telephonyTestStatus").classList.remove("hidden");
+    const label = TELEPHONY_TEST_STATUS_LABELS[call.status] || call.status;
+    $("#telephonyTestStatusTitle").textContent = label;
+    const badge = $("#telephonyTestStatusBadge");
+    badge.textContent = String(call.status || "").toUpperCase();
+    badge.className = `test-status-badge ${call.status || ""}`;
+    $("#telephonyTestId").textContent = call.test_id;
+    $("#telephonyTestMaskedPhone").textContent = call.phone;
+    $("#telephonyTestFilename").textContent = call.audio_filename;
+    $("#telephonyTestDuration").textContent = `${Number(call.duration_seconds || 0).toFixed(2)} с`;
+    const error = $("#telephonyTestError");
+    error.textContent = call.error || "";
+    error.classList.toggle("hidden", !call.error);
+    $("#telephonyTestTimeline").innerHTML = (call.timeline || []).map((entry) => {
+        const eventLabel = TELEPHONY_TEST_EVENT_LABELS[entry.event] || entry.event;
+        const details = Object.entries(entry.details || {})
+            .map(([key, value]) => `${escapeHtml(key)}=${escapeHtml(value)}`)
+            .join(" · ");
+        return `
+            <div class="telephony-timeline-item">
+                <time>+${(Number(entry.elapsed_ms || 0) / 1000).toFixed(3)} с</time>
+                <div>
+                    <strong>${escapeHtml(eventLabel)}</strong>
+                    ${details ? `<small>${details}</small>` : ""}
+                </div>
+            </div>
+        `;
+    }).join("");
 }
 
 function localDateInputValue(date = new Date()) {

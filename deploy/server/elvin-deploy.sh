@@ -6,6 +6,7 @@ CONFIG_DIR="${ELVIN_CONFIG_DIR:-/opt/lead-voice/config}"
 DATA_DIR="${ELVIN_DATA_DIR_HOST:-/opt/lead-voice/data}"
 LOG_DIR="${ELVIN_LOG_DIR_HOST:-/opt/lead-voice/logs}"
 RECORDINGS_DIR="${ELVIN_RECORDINGS_DIR_HOST:-/opt/lead-voice/recordings}"
+ASTERISK_CONFIG_DIR="${ELVIN_ASTERISK_CONFIG_DIR:-/etc/asterisk}"
 BRANCH="${ELVIN_GIT_BRANCH:-main}"
 NAME="${ELVIN_CONTAINER_NAME:-elvin-backend}"
 CANDIDATE="${NAME}-candidate"
@@ -95,8 +96,9 @@ deploy/server/elvin-disable-persistence.sh
 
 # Asterisk AMI intentionally listens on host loopback only. Expose it solely
 # on the Docker bridge through a systemd socket proxy, never on a public
-# interface. The backend uses this real-time control path only for the optional
-# interruption-tail voice fade and an explicit robot-requested hangup.
+# interface. The backend uses this real-time control path for the optional
+# interruption-tail voice fade, explicit robot-requested hangup, and the
+# isolated direct-SIP telephony test.
 install -m 0644 deploy/server/elvin-ami-proxy.socket \
   /etc/systemd/system/elvin-ami-proxy.socket
 install -m 0644 deploy/server/elvin-ami-proxy.service \
@@ -114,10 +116,26 @@ required=(
   deploy/server/elvin-asterisk-no-output.conf
   deploy/server/elvin-rsyslog-drop-asterisk.conf
   deploy/server/elvin-disable-persistence.sh
+  deploy/server/elvin-telephony-test.conf
 )
 for file in "${required[@]}"; do
   [[ -f "$file" ]] || die "required file is missing: ${file}"
 done
+
+# Install one isolated direct-SIP playback context.  The production
+# from-lptracker -> elvin-ai -> chan_websocket route is left untouched.
+install -d -m 0755 "$ASTERISK_CONFIG_DIR/extensions.d"
+install -m 0644 deploy/server/elvin-telephony-test.conf \
+  "$ASTERISK_CONFIG_DIR/extensions.d/elvin-telephony-test.conf"
+extensions_file="$ASTERISK_CONFIG_DIR/extensions.conf"
+include_line='#include extensions.d/elvin-telephony-test.conf'
+grep -Fqx "$include_line" "$extensions_file" \
+  || printf '\n%s\n' "$include_line" >> "$extensions_file"
+asterisk -rx "dialplan reload" >/dev/null
+dialplan_output="$(asterisk -rx "dialplan show elvin-telephony-test")"
+grep -Fq "Elvin isolated telephony test" <<<"$dialplan_output" \
+  || die "isolated telephony-test dialplan was not loaded"
+
 if grep -Eqi 'applied-caas|internal\.api\.openai' uv.lock; then
   die "uv.lock contains an internal package registry"
 fi

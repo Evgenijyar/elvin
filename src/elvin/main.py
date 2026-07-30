@@ -20,6 +20,7 @@ from elvin.api.routes import (
     robots,
     settings,
     system,
+    telephony_test,
     webhooks,
 )
 from elvin.config import get_settings
@@ -28,6 +29,7 @@ from elvin.integrations.lptracker import LPTrackerClient, LPTrackerError
 from elvin.media.runtime import VoiceRuntime, preload_voice_runtime
 from elvin.media.turn_detector import TurnDetectorConfig
 from elvin.services.call_queue import CallQueueManager
+from elvin.services.telephony_test import TelephonyTestService
 
 logger = logging.getLogger("elvin")
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -55,6 +57,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     store = StateStore(app_settings)
     await store.initialize()
     lptracker = LPTrackerClient(app_settings.lptracker_base_url)
+    telephony_test_service = TelephonyTestService(app_settings)
 
     media_marker = app_settings.data_dir / "media-ready"
     effective_media_ready = app_settings.media_ready or media_marker.is_file()
@@ -94,6 +97,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     application.state.settings = app_settings
     application.state.store = store
     application.state.lptracker = lptracker
+    application.state.telephony_test = telephony_test_service
     application.state.voice_runtime = voice_runtime
     application.state.call_queue = call_queue
     application.state.calls_enabled = effective_calls_enabled
@@ -111,6 +115,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         await call_queue.close()
+        await telephony_test_service.close()
         await lptracker.close()
         await store.close()
 
@@ -134,6 +139,7 @@ def create_app() -> FastAPI:
         settings,
         dashboard,
         calls,
+        telephony_test,
         webhooks,
         media,
     ):

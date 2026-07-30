@@ -40,6 +40,7 @@
                 <button class="nav-button active" data-page="calls">Обзвон</button>
                 <button class="nav-button" data-page="history">Звонки</button>
                 <button class="nav-button" data-page="robots">Роботы</button>
+                <button class="nav-button" data-page="telephonyTest">Тест телефонии</button>
                 <button class="nav-button" data-page="settings">Настройки</button>
             </nav>
             <div class="top-actions">
@@ -261,6 +262,58 @@
                                     </div>
                                 </div>
                             </form>
+                        </section>
+                    </div>
+                </section>
+
+                <section id="telephonyTestPage" class="page">
+                    <div class="workspace-heading">
+                        <div>
+                            <div class="eyebrow">ИЗОЛИРОВАННЫЙ SIP-КОНТУР</div>
+                            <h2>Тест телефонии</h2>
+                            <p class="muted">Asterisk напрямую набирает номер через SIP-сотрудника LPTracker и проигрывает файл только после ответа абонента.</p>
+                        </div>
+                        <div id="telephonyTestAvailability" class="runtime-badge">Проверяем AMI…</div>
+                    </div>
+
+                    <div class="telephony-test-layout">
+                        <form id="telephonyTestForm" class="settings-card telephony-test-card">
+                            <div class="telephony-test-notice">
+                                Этот тест не использует очередь обзвона, Gemini и рабочий WebSocket-мост Elvin.
+                            </div>
+                            <label>
+                                <span>Номер телефона</span>
+                                <input id="telephonyTestPhone" type="tel" autocomplete="tel" placeholder="+7 999 123-45-67" required>
+                                <small>Российские номера можно вводить с +7, 7, 8 или десятью цифрами.</small>
+                            </label>
+                            <label>
+                                <span>Аудиофайл для проигрывания после ответа</span>
+                                <input id="telephonyTestAudio" type="file" accept=".wav,.mp3,.m4a,.aac,.flac,.ogg,.opus,.webm,audio/*" required>
+                                <small>До 50 МБ и 10 минут. На сервере файл преобразуется в WAV 8 кГц mono.</small>
+                            </label>
+                            <div id="telephonyTestMessage" class="form-message"></div>
+                            <div class="settings-actions">
+                                <button id="startTelephonyTestButton" class="primary-button" type="submit">Позвонить</button>
+                            </div>
+                        </form>
+
+                        <section id="telephonyTestStatus" class="telephony-test-status hidden" aria-live="polite">
+                            <div class="telephony-test-status-head">
+                                <div>
+                                    <div class="eyebrow">ТЕКУЩИЙ ТЕСТ</div>
+                                    <h3 id="telephonyTestStatusTitle">Подготовка…</h3>
+                                </div>
+                                <span id="telephonyTestStatusBadge" class="test-status-badge">QUEUED</span>
+                            </div>
+                            <dl class="telephony-test-meta">
+                                <div><dt>ID</dt><dd id="telephonyTestId">—</dd></div>
+                                <div><dt>Номер</dt><dd id="telephonyTestMaskedPhone">—</dd></div>
+                                <div><dt>Файл</dt><dd id="telephonyTestFilename">—</dd></div>
+                                <div><dt>Длительность</dt><dd id="telephonyTestDuration">—</dd></div>
+                            </dl>
+                            <div id="telephonyTestError" class="telephony-test-error hidden"></div>
+                            <div class="timeline-heading">Хронология Asterisk / AMI</div>
+                            <div id="telephonyTestTimeline" class="telephony-test-timeline"></div>
                         </section>
                     </div>
                 </section>
