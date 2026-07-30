@@ -724,6 +724,26 @@ async function renderCalls() {
                 <button class="assignment-delete" type="button" title="Удалить">×</button>
             </div>
             <div class="assignment-body">
+                <div class="call-transport-row">
+                    <div>
+                        <strong>Способ звонка</strong>
+                        <small>Можно переключать только при остановленной очереди.</small>
+                    </div>
+                    <div class="call-transport-switch" role="radiogroup" aria-label="Способ звонка">
+                        <label>
+                            <input class="call-transport-input" type="radio"
+                                name="call-transport-${item.id}" value="lptracker_api"
+                                ${item.call_transport !== "direct_sip" ? "checked" : ""}>
+                            <span>API LPTracker</span>
+                        </label>
+                        <label>
+                            <input class="call-transport-input" type="radio"
+                                name="call-transport-${item.id}" value="direct_sip"
+                                ${item.call_transport === "direct_sip" ? "checked" : ""}>
+                            <span>Напрямую</span>
+                        </label>
+                    </div>
+                </div>
                 <div class="stage-grid">
                     ${stageField("Откуда забирать лиды", "source-stage", "source_stage_id", "source_stage_name", stages, item)}
                     ${stageField("Лид", "outcome-stage", "lead_stage_id", "lead_stage_name", stages, item)}
@@ -799,6 +819,27 @@ async function renderCalls() {
         card.querySelector(".count-special").addEventListener("change", async (event) => {
             try { await updateAssignmentValue(id, item, { count_special_as_lead: event.target.checked }); }
             catch (error) { showToast(error.message, true); }
+        });
+        card.querySelectorAll(".call-transport-input").forEach((input) => {
+            input.addEventListener("change", async (event) => {
+                if (!event.target.checked) return;
+                const previous = item.call_transport || "lptracker_api";
+                try {
+                    await updateAssignmentValue(
+                        id,
+                        item,
+                        { call_transport: event.target.value },
+                        event.target.value === "direct_sip"
+                            ? "Включены прямые звонки Asterisk"
+                            : "Включены звонки через API LPTracker",
+                    );
+                } catch (error) {
+                    card.querySelector(
+                        `.call-transport-input[value="${previous}"]`,
+                    ).checked = true;
+                    showToast(error.message, true);
+                }
+            });
         });
         card.querySelector(".call-limit").addEventListener("change", async (event) => {
             const value = Math.max(1, Math.min(1000, Number(event.target.value || 50)));
@@ -896,6 +937,9 @@ function renderStartStopButton(card, batch) {
         ? "flat-button danger start-stop"
         : "primary-button start-stop";
     button.disabled = batch?.status === "STOPPING";
+    card.querySelectorAll(".call-transport-input").forEach((input) => {
+        input.disabled = active;
+    });
 }
 
 async function previewLeads(assignmentId) {

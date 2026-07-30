@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
+from uuid import uuid4
 
 
 class AsteriskAmiError(RuntimeError):
@@ -181,6 +182,134 @@ class AsteriskAmiClient:
         self._writer = None
         if writer is None:
             return
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except OSError:
+            pass
+
+
+class AsteriskAmiEventConnection:
+    """One authenticated AMI connection with events enabled.
+
+    The caller owns the single reader loop. Actions may be written while that
+    loop is active, which is required for an asynchronous Originate followed
+    by a possible Hangup.
+    """
+
+    def __init__(
+        self,
+        *,
+        host: str,
+        port: int,
+        username: str,
+        password: str,
+        timeout_seconds: float = 3.0,
+    ) -> None:
+        self.host = host
+        self.port = port
+        self.username = username
+        self.password = password
+        self.timeout_seconds = timeout_seconds
+        self.reader: asyncio.StreamReader | None = None
+        self.writer: asyncio.StreamWriter | None = None
+        self._write_lock = asyncio.Lock()
+
+    async def connect(self) -> str:
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(self.host, self.port),
+                timeout=self.timeout_seconds,
+            )
+            greeting = await asyncio.wait_for(
+                reader.readline(),
+                timeout=self.timeout_seconds,
+            )
+        except (OSError, TimeoutError) as exc:
+            raise AsteriskAmiError(
+                f"Unable to connect to Asterisk AMI at {self.host}:{self.port}"
+            ) from exc
+        if not greeting.startswith(b"Asterisk Call Manager/"):
+            writer.close()
+            await writer.wait_closed()
+            raise AsteriskAmiError("Unexpected Asterisk AMI greeting")
+        self.reader = reader
+        self.writer = writer
+
+        action_id = f"elvin-events-login-{uuid4().hex}"
+        await self.send(
+            {
+                "Action": "Login",
+                "ActionID": action_id,
+                "Username": self.username,
+                "Secret": self.password,
+                "Events": "on",
+            }
+        )
+        response = await self.wait_for_action_response(
+            action_id,
+            timeout=self.timeout_seconds,
+        )
+        if response.get("Response", "").lower() != "success":
+            await self.close()
+            raise AsteriskAmiError("Asterisk AMI authentication failed")
+        return greeting.decode("utf-8", "replace").strip()
+
+    async def send(self, fields: Mapping[str, str]) -> None:
+        writer = self.writer
+        if writer is None or writer.is_closing():
+            raise AsteriskAmiError("Asterisk AMI is not connected")
+        lines: list[str] = []
+        for key, value in fields.items():
+            text = str(value)
+            if "\r" in text or "\n" in text:
+                raise AsteriskAmiError(f"Invalid AMI field: {key}")
+            lines.append(f"{key}: {text}")
+        async with self._write_lock:
+            writer.write(("\r\n".join(lines) + "\r\n\r\n").encode("utf-8"))
+            try:
+                await asyncio.wait_for(
+                    writer.drain(),
+                    timeout=self.timeout_seconds,
+                )
+            except (OSError, TimeoutError) as exc:
+                raise AsteriskAmiError("Unable to write Asterisk AMI action") from exc
+
+    async def read(self) -> dict[str, str]:
+        reader = self.reader
+        if reader is None:
+            raise AsteriskAmiError("Asterisk AMI is not connected")
+        try:
+            return await AsteriskAmiClient._read_message(reader)
+        except (OSError, asyncio.IncompleteReadError) as exc:
+            raise AsteriskAmiError("Asterisk closed the AMI connection") from exc
+
+    async def wait_for_action_response(
+        self,
+        action_id: str,
+        *,
+        timeout: float,
+    ) -> dict[str, str]:
+        async with asyncio.timeout(timeout):
+            while True:
+                message = await self.read()
+                if (
+                    message.get("ActionID") == action_id
+                    and "Response" in message
+                ):
+                    return message
+
+    async def close(self) -> None:
+        writer = self.writer
+        if writer is None:
+            return
+        if not writer.is_closing():
+            try:
+                await self.send({"Action": "Logoff"})
+            except AsteriskAmiError:
+                pass
+        self.reader = None
+        self.writer = None
         writer.close()
         try:
             await writer.wait_closed()

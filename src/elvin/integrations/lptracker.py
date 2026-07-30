@@ -6,6 +6,7 @@ from typing import Any
 
 import httpx
 
+from elvin.core.phone import first_phone_from_details
 
 logger = logging.getLogger("elvin.lptracker")
 
@@ -338,18 +339,7 @@ class LPTrackerClient:
 
     def _extract_phone(self, lead: dict[str, Any]) -> str | None:
         contact = lead.get("contact") or {}
-        for detail in contact.get("details") or []:
-            if not isinstance(detail, dict):
-                continue
-            detail_type = str(detail.get("type") or "").lower()
-            if "phone" in detail_type:
-                value = str(detail.get("data") or "").strip()
-                if value:
-                    return value
-        return None
+        return first_phone_from_details(contact.get("details"))
 
     def _mask_phone(self, phone: str) -> str:
-        compact = "".join(character for character in phone if character.isdigit())
-        if len(compact) <= 4:
-            return "***"
-        return f"+***{compact[-4:]}"
+        return f"+***{phone[-4:]}" if len(phone) > 4 else "***"

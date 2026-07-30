@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import uuid4
 
 import asyncpg
@@ -51,6 +51,7 @@ class AssignmentCreate(BaseModel):
 
 
 class AssignmentUpdate(BaseModel):
+    call_transport: Literal["lptracker_api", "direct_sip"] | None = None
     source_stage_id: int | None = None
     source_stage_name: str | None = None
     lead_stage_id: int | None = None

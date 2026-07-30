@@ -37,6 +37,10 @@ async def media_status(request: Request) -> dict[str, object]:
         "sample_rate": 16000,
         "codec": "slin16",
         "asterisk_transport": "chan_websocket",
+        "outbound_transports": {
+            "lptracker_api": True,
+            "direct_sip": queue.direct_calls.configured,
+        },
         "turn_detection": "Pipecat Silero VAD + Smart Turn v3",
         "gemini_server_vad": {"enabled": False},
         "gemini_preconnect_before_lptracker": True,

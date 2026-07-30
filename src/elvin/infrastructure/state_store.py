@@ -13,6 +13,7 @@ import asyncpg
 from asyncpg import Pool
 
 from elvin.config import Settings
+from elvin.services.call_transport import LPTRACKER_API, normalize_call_transport
 
 
 DEFAULT_STATE: dict[str, Any] = {
@@ -44,6 +45,7 @@ ROBOT_DEFAULTS: dict[str, Any] = {
 }
 
 ASSIGNMENT_DEFAULTS: dict[str, Any] = {
+    "call_transport": LPTRACKER_API,
     "source_stage_id": None,
     "source_stage_name": "",
     "call_limit": 50,
@@ -275,6 +277,7 @@ class StateStore:
                 "ALTER TABLE app.project_robot_assignments ADD COLUMN IF NOT EXISTS lead_limit INTEGER NOT NULL DEFAULT 0",
                 "ALTER TABLE app.project_robot_assignments ADD COLUMN IF NOT EXISTS background_audio_filename TEXT NOT NULL DEFAULT ''",
                 "ALTER TABLE app.project_robot_assignments ADD COLUMN IF NOT EXISTS background_audio_volume INTEGER NOT NULL DEFAULT 15",
+                "ALTER TABLE app.project_robot_assignments ADD COLUMN IF NOT EXISTS call_transport TEXT NOT NULL DEFAULT 'lptracker_api'",
             ):
                 await connection.execute(statement)
             await connection.execute(
@@ -732,6 +735,7 @@ class StateStore:
             rows = await self.pool.fetch(
                 """
                 SELECT a.id, a.project_id, a.project_name, a.robot_id,
+                       a.call_transport,
                        a.source_stage_id, a.source_stage_name, a.status,
                        a.webhook_registered, a.sort_order,
                        a.call_limit, a.lead_limit, a.max_call_minutes,
@@ -763,6 +767,9 @@ class StateStore:
             merged = deepcopy(assignment)
             for key, default in ASSIGNMENT_DEFAULTS.items():
                 merged.setdefault(key, deepcopy(default))
+            merged["call_transport"] = normalize_call_transport(
+                merged.get("call_transport")
+            )
             merged.update(
                 {
                     "robot_name": robot["name"],
@@ -792,6 +799,9 @@ class StateStore:
             "project_id": int(payload["project_id"]),
             "project_name": payload["project_name"],
             "robot_id": payload["robot_id"],
+            "call_transport": normalize_call_transport(
+                payload.get("call_transport")
+            ),
             "source_stage_id": None,
             "source_stage_name": "",
             "status": "STOPPED",
@@ -886,8 +896,13 @@ class StateStore:
             "count_special_as_lead",
             "background_audio_filename",
             "background_audio_volume",
+            "call_transport",
         }
         updates = {key: value for key, value in payload.items() if key in allowed}
+        if "call_transport" in updates:
+            updates["call_transport"] = normalize_call_transport(
+                updates["call_transport"]
+            )
         if not updates:
             return await self.get_assignment(assignment_id)
         if self.mode == "postgres" and self.pool is not None:
@@ -1618,4 +1633,7 @@ class StateStore:
         item["updated_at"] = item["updated_at"].isoformat()
         for key, default in ASSIGNMENT_DEFAULTS.items():
             item.setdefault(key, deepcopy(default))
+        item["call_transport"] = normalize_call_transport(
+            item.get("call_transport")
+        )
         return item

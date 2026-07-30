@@ -21,6 +21,12 @@ from elvin.services.call_outcomes import (
     destination_for_outcome,
     outcome_counts_as_lead,
 )
+from elvin.services.call_transport import DIRECT_SIP, normalize_call_transport
+from elvin.services.direct_call import (
+    AsteriskDirectCallService,
+    DirectCallError,
+    DirectCallHandle,
+)
 
 logger = logging.getLogger("elvin.calls")
 
@@ -43,19 +49,20 @@ MediaTerminator = Callable[[], Awaitable[None]]
 
 
 class CallQueueManager:
-    """Build queues and run one LPTracker call at a time.
+    """Build queues and run one prepared voice call at a time.
 
     Critical ordering for every item:
     1. Build local VAD/Smart Turn state.
     2. Establish the actual Gemini Live session and wait for setup complete.
     3. Publish the prepared media context.
-    4. Only then call LPTracker `/lead/{lead_id}/call`.
+    4. Only then request the selected LPTracker API or direct-SIP transport.
     """
 
     def __init__(
         self,
         store: StateStore,
         lptracker: LPTrackerClient,
+        direct_calls: AsteriskDirectCallService,
         voice_runtime: VoiceRuntime,
         settings: Settings,
         *,
@@ -65,6 +72,7 @@ class CallQueueManager:
     ) -> None:
         self.store = store
         self.lptracker = lptracker
+        self.direct_calls = direct_calls
         self.voice_runtime = voice_runtime
         self.settings = settings
         self.calls_enabled = calls_enabled
@@ -128,6 +136,11 @@ class CallQueueManager:
             raise CallQueueError("Новый голосовой медиаконтур ещё не готов.")
         if not await self._gemini_key():
             raise CallQueueError("Gemini API key не настроен.")
+        transport = normalize_call_transport(assignment.get("call_transport"))
+        if transport == DIRECT_SIP and not self.direct_calls.configured:
+            raise CallQueueError(
+                "Прямые звонки недоступны: Asterisk AMI не настроен."
+            )
 
         batch = await self.store.get_latest_call_batch(assignment["id"])
         if batch is None or batch["status"] in {"COMPLETED", "FAILED", "STOPPED"}:
@@ -153,9 +166,10 @@ class CallQueueManager:
                 name=f"elvin-call-batch-{batch_id}",
             )
         logger.warning(
-            "Call batch scheduled: batch=%s assignment=%s",
+            "Call batch scheduled: batch=%s assignment=%s transport=%s",
             batch_id,
             assignment["id"],
+            transport,
         )
         return await self.store.get_call_batch(batch_id) or batch
 
@@ -187,7 +201,7 @@ class CallQueueManager:
             return await asyncio.wait_for(wait_and_claim(), timeout=timeout)
         except TimeoutError as exc:
             raise CallQueueError(
-                "Asterisk подключился без ожидающего вызова LPTracker."
+                "Asterisk подключился без ожидающего голосового вызова Elvin."
             ) from exc
 
     async def register_media_terminator(
@@ -237,6 +251,9 @@ class CallQueueManager:
             assignment = await self.store.get_assignment(batch["assignment_id"])
             if assignment is None:
                 raise CallQueueError("Назначение проекта не найдено.")
+            call_transport = normalize_call_transport(
+                assignment.get("call_transport")
+            )
             max_call_seconds = max(
                 60,
                 min(int(assignment.get("max_call_minutes") or 5), 120) * 60,
@@ -255,6 +272,12 @@ class CallQueueManager:
             background_volume = int(assignment.get("background_audio_volume") or 0)
             await self.store.update_assignment(
                 batch["assignment_id"], {"status": "RUNNING"}
+            )
+            logger.warning(
+                "Call batch started: batch=%s assignment=%s transport=%s",
+                batch_id,
+                batch["assignment_id"],
+                call_transport,
             )
 
             while not stop_event.is_set():
@@ -277,6 +300,7 @@ class CallQueueManager:
                     break
                 context: MediaCallContext | None = None
                 voice_call: PreparedVoiceCall | None = None
+                direct_call: DirectCallHandle | None = None
                 media_started = asyncio.Event()
                 completed = asyncio.Event()
                 self._media_started_events[batch_id] = media_started
@@ -325,9 +349,13 @@ class CallQueueManager:
                     await self.store.update_call_batch(
                         batch_id, status="CALL_REQUESTING"
                     )
-                    voice_call.timeline.add("LPTRACKER_CALL_REQUEST")
-                    await self.lptracker.call_lead(token, context.lead_id)
-                    voice_call.timeline.add("LPTRACKER_CALL_ACCEPTED")
+                    direct_call = await self._request_outbound_call(
+                        transport=call_transport,
+                        token=token,
+                        context=context,
+                        item=item,
+                        max_call_seconds=max_call_seconds,
+                    )
                     await self.store.update_call_item(
                         item["id"], call_started_at=datetime.now(UTC)
                     )
@@ -339,12 +367,19 @@ class CallQueueManager:
                         batch_id, status="WAITING_FOR_MEDIA"
                     )
 
-                    wait_result = await self._wait_event_or_stop(
+                    wait_result = await self._wait_for_media_start(
                         media_started,
                         stop_event,
-                        self.media_connect_timeout_seconds,
+                        direct_call=direct_call,
+                        timeout=(
+                            75.0
+                            if call_transport == DIRECT_SIP
+                            else self.media_connect_timeout_seconds
+                        ),
                     )
                     if wait_result == "stopped":
+                        if direct_call is not None:
+                            await direct_call.hangup()
                         await self._finish_call_item(
                             item["id"],
                             voice_call,
@@ -352,7 +387,45 @@ class CallQueueManager:
                             result="stopped_by_user",
                         )
                         break
+                    if wait_result == "direct_finished":
+                        if media_started.is_set():
+                            wait_result = "event"
+                        elif direct_call is not None and direct_call.status in {
+                            "no_answer",
+                            "ended",
+                            "cancelled",
+                        }:
+                            await self._record_outcome(
+                                token=token,
+                                assignment=assignment,
+                                item=item,
+                                outcome=NO_ANSWER_KEY,
+                                voice_call=voice_call,
+                            )
+                            await self._finish_call_item(
+                                item["id"],
+                                voice_call,
+                                status="COMPLETED",
+                                result="no_answer",
+                                error_message=direct_call.error,
+                            )
+                            await self.store.increment_call_batch(
+                                batch_id,
+                                completed=1,
+                            )
+                            continue
+                        else:
+                            raise DirectCallError(
+                                (
+                                    direct_call.error
+                                    if direct_call is not None
+                                    else ""
+                                )
+                                or "Прямой звонок завершился до подключения медиа."
+                            )
                     if wait_result == "timeout":
+                        if direct_call is not None:
+                            await direct_call.hangup()
                         await self._record_outcome(
                             token=token,
                             assignment=assignment,
@@ -399,6 +472,8 @@ class CallQueueManager:
                         )
                     elif call_result == "stopped":
                         await self._terminate_media(batch_id)
+                        if direct_call is not None:
+                            await direct_call.hangup()
                         await self._finish_call_item(
                             item["id"],
                             voice_call,
@@ -408,6 +483,8 @@ class CallQueueManager:
                         break
                     else:
                         await self._terminate_media(batch_id)
+                        if direct_call is not None:
+                            await direct_call.hangup()
                         outcome = voice_call.gemini.classified_outcome
                         if outcome:
                             await self._record_outcome(
@@ -442,6 +519,8 @@ class CallQueueManager:
                     if stop_event.is_set():
                         break
                 finally:
+                    if direct_call is not None:
+                        await self._settle_direct_call(direct_call)
                     await self._clear_media_for_batch(batch_id)
                     self._clear_item_events(batch_id)
                 if not stop_event.is_set():
@@ -478,6 +557,98 @@ class CallQueueManager:
                 self._tasks.pop(batch_id, None)
                 self._stop_events.pop(batch_id, None)
                 self._clear_item_events(batch_id)
+
+    async def _request_outbound_call(
+        self,
+        *,
+        transport: str,
+        token: str,
+        context: MediaCallContext,
+        item: dict[str, Any],
+        max_call_seconds: float,
+    ) -> DirectCallHandle | None:
+        if transport == DIRECT_SIP:
+            phone = str(item.get("phone_number") or "").strip()
+            if not phone:
+                raise DirectCallError(
+                    "В элементе очереди отсутствует номер для прямого звонка."
+                )
+            context.voice_call.timeline.add(
+                "DIRECT_SIP_CALL_REQUEST",
+                phone_masked=item.get("phone_masked") or "",
+            )
+            handle = await self.direct_calls.start_call(
+                phone=phone,
+                batch_id=context.batch_id,
+                lead_id=context.lead_id,
+                max_call_seconds=max_call_seconds,
+            )
+            context.voice_call.timeline.add(
+                "DIRECT_SIP_CALL_ACCEPTED",
+                direct_call_id=handle.call_id,
+            )
+            return handle
+
+        context.voice_call.timeline.add("LPTRACKER_CALL_REQUEST")
+        await self.lptracker.call_lead(token, context.lead_id)
+        context.voice_call.timeline.add("LPTRACKER_CALL_ACCEPTED")
+        return None
+
+    @staticmethod
+    async def _wait_for_media_start(
+        media_started: asyncio.Event,
+        stop_event: asyncio.Event,
+        *,
+        direct_call: DirectCallHandle | None,
+        timeout: float,
+    ) -> str:
+        media_task = asyncio.create_task(media_started.wait())
+        stop_task = asyncio.create_task(stop_event.wait())
+        direct_task = (
+            asyncio.create_task(direct_call.finished.wait())
+            if direct_call is not None
+            else None
+        )
+        waiters = {media_task, stop_task}
+        if direct_task is not None:
+            waiters.add(direct_task)
+        try:
+            done, _ = await asyncio.wait(
+                waiters,
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if stop_task in done and stop_event.is_set():
+                return "stopped"
+            if media_task in done and media_started.is_set():
+                return "event"
+            if (
+                direct_task is not None
+                and direct_task in done
+                and direct_call is not None
+                and direct_call.finished.is_set()
+            ):
+                return "direct_finished"
+            return "timeout"
+        finally:
+            for task in waiters:
+                task.cancel()
+            await asyncio.gather(*waiters, return_exceptions=True)
+
+    @staticmethod
+    async def _settle_direct_call(handle: DirectCallHandle) -> None:
+        if handle.finished.is_set():
+            return
+        if await handle.wait_finished(timeout=3.0):
+            return
+        await handle.hangup()
+        if not await handle.wait_finished(timeout=3.0):
+            logger.error(
+                "Direct call did not terminate after Hangup: call=%s batch=%s lead=%s",
+                handle.call_id,
+                handle.batch_id,
+                handle.lead_id,
+            )
 
     async def _finish_call_item(
         self,

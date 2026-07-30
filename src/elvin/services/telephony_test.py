@@ -19,11 +19,15 @@ from time import monotonic
 from typing import Any
 
 from elvin.config import Settings
+from elvin.core.phone import (
+    PhoneNumberError,
+    mask_phone_number,
+    normalize_outbound_phone,
+)
 
 logger = logging.getLogger("elvin.telephony_test")
 
 _TERMINAL_STATUSES = {"completed", "ended", "failed", "cancelled"}
-_PHONE_DIGITS = re.compile(r"^[1-9]\d{6,14}$")
 _MAX_RETAINED_CALLS = 50
 
 
@@ -33,30 +37,10 @@ class TelephonyTestError(RuntimeError):
 
 def normalize_phone_number(value: str) -> str:
     """Return a dial-safe international number containing digits only."""
-    raw = str(value or "").strip()
-    if not raw:
-        raise TelephonyTestError("Введите номер телефона.")
-    if not re.fullmatch(r"[\d\s()+-]+", raw):
-        raise TelephonyTestError(
-            "Номер может содержать только цифры, пробелы, скобки, плюс и дефисы."
-        )
-    digits = re.sub(r"\D", "", raw)
-    if len(digits) == 10:
-        digits = f"7{digits}"
-    elif len(digits) == 11 and digits.startswith("8"):
-        digits = f"7{digits[1:]}"
-    if not _PHONE_DIGITS.fullmatch(digits):
-        raise TelephonyTestError(
-            "Введите международный номер: от 7 до 15 цифр, например 79991234567."
-        )
-    return digits
-
-
-def mask_phone_number(phone: str) -> str:
-    if len(phone) <= 4:
-        return phone
-    visible_prefix = min(2, max(1, len(phone) - 4))
-    return f"{phone[:visible_prefix]}{'*' * (len(phone) - visible_prefix - 4)}{phone[-4:]}"
+    try:
+        return normalize_outbound_phone(value)
+    except PhoneNumberError as exc:
+        raise TelephonyTestError(str(exc)) from exc
 
 
 @dataclass

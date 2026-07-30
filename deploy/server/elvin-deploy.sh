@@ -118,32 +118,40 @@ required=(
   deploy/server/elvin-rsyslog-drop-asterisk.conf
   deploy/server/elvin-disable-persistence.sh
   deploy/server/elvin-telephony-test.conf
+  deploy/server/elvin-direct-calls.conf
 )
 for file in "${required[@]}"; do
   [[ -f "$file" ]] || die "required file is missing: ${file}"
 done
 
-# Install one isolated direct-SIP playback context.  The production
-# from-lptracker -> elvin-ai -> chan_websocket route is left untouched.
+# Install the isolated playback test and the optional production direct-SIP
+# context. The existing LPTracker API -> inbound PJSIP route stays available.
 install -d -m 0755 "$ASTERISK_CONFIG_DIR/extensions.d"
 install -m 0644 deploy/server/elvin-telephony-test.conf \
   "$ASTERISK_CONFIG_DIR/extensions.d/elvin-telephony-test.conf"
+install -m 0644 deploy/server/elvin-direct-calls.conf \
+  "$ASTERISK_CONFIG_DIR/extensions.d/elvin-direct-calls.conf"
 extensions_file="$ASTERISK_CONFIG_DIR/extensions.conf"
 include_line='#include extensions.d/elvin-telephony-test.conf'
 grep -Fqx "$include_line" "$extensions_file" \
   || printf '\n%s\n' "$include_line" >> "$extensions_file"
+direct_include_line='#include extensions.d/elvin-direct-calls.conf'
+grep -Fqx "$direct_include_line" "$extensions_file" \
+  || printf '%s\n' "$direct_include_line" >> "$extensions_file"
 asterisk -rx "dialplan reload" >/dev/null
 dialplan_loaded=false
 for _attempt in $(seq 1 10); do
   dialplan_output="$(asterisk -rx "dialplan show elvin-telephony-test")"
-  if grep -Fq "Elvin isolated telephony test" <<<"$dialplan_output"; then
+  direct_dialplan_output="$(asterisk -rx "dialplan show elvin-direct-outbound")"
+  if grep -Fq "Elvin isolated telephony test" <<<"$dialplan_output" \
+    && grep -Fq "Elvin direct outbound call" <<<"$direct_dialplan_output"; then
     dialplan_loaded=true
     break
   fi
   sleep 0.2
 done
 [[ "$dialplan_loaded" == true ]] \
-  || die "isolated telephony-test dialplan was not loaded"
+  || die "Elvin telephony dialplans were not loaded"
 
 if grep -Eqi 'applied-caas|internal\.api\.openai' uv.lock; then
   die "uv.lock contains an internal package registry"

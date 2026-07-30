@@ -29,6 +29,7 @@ from elvin.integrations.lptracker import LPTrackerClient, LPTrackerError
 from elvin.media.runtime import VoiceRuntime, preload_voice_runtime
 from elvin.media.turn_detector import TurnDetectorConfig
 from elvin.services.call_queue import CallQueueManager
+from elvin.services.direct_call import AsteriskDirectCallService
 from elvin.services.telephony_test import TelephonyTestService
 
 logger = logging.getLogger("elvin")
@@ -58,6 +59,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     await store.initialize()
     lptracker = LPTrackerClient(app_settings.lptracker_base_url)
     telephony_test_service = TelephonyTestService(app_settings)
+    direct_call_service = AsteriskDirectCallService(app_settings)
 
     media_marker = app_settings.data_dir / "media-ready"
     effective_media_ready = app_settings.media_ready or media_marker.is_file()
@@ -87,6 +89,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     call_queue = CallQueueManager(
         store,
         lptracker,
+        direct_call_service,
         voice_runtime,
         app_settings,
         calls_enabled=effective_calls_enabled,
@@ -98,6 +101,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     application.state.store = store
     application.state.lptracker = lptracker
     application.state.telephony_test = telephony_test_service
+    application.state.direct_calls = direct_call_service
     application.state.voice_runtime = voice_runtime
     application.state.call_queue = call_queue
     application.state.calls_enabled = effective_calls_enabled
@@ -115,6 +119,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         await call_queue.close()
+        await direct_call_service.close()
         await telephony_test_service.close()
         await lptracker.close()
         await store.close()

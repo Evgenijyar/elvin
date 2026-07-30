@@ -117,6 +117,68 @@ input:focus, select:focus, textarea:focus { border-color: var(--accent); box-sha
 
 .assignment-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 18px; }
 .assignment-card { border: 1px solid var(--border); border-radius: 20px; background: var(--panel); overflow: hidden; }
+.call-transport-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 18px;
+    align-items: center;
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    background: rgba(255, 255, 255, .025);
+}
+.call-transport-row > div:first-child { min-width: 180px; }
+.call-transport-row strong { display: block; font-size: 13px; }
+.call-transport-row small {
+    display: block;
+    margin-top: 4px;
+    color: var(--muted);
+    font-size: 11px;
+}
+.call-transport-switch {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    min-width: 310px;
+    padding: 3px;
+    border: 1px solid var(--border);
+    border-radius: 11px;
+    background: var(--panel-2);
+}
+.call-transport-switch label { cursor: pointer; }
+.call-transport-switch input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
+}
+.call-transport-switch span {
+    display: block;
+    padding: 9px 13px;
+    border-radius: 8px;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 800;
+    text-align: center;
+    transition: background .15s ease, color .15s ease;
+}
+.call-transport-switch input:checked + span {
+    background: rgba(125, 140, 255, .18);
+    color: #eef0ff;
+    box-shadow: inset 0 0 0 1px rgba(125, 140, 255, .3);
+}
+.call-transport-switch input:focus-visible + span {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+}
+.call-transport-switch input:disabled + span {
+    cursor: not-allowed;
+    opacity: .55;
+}
+@media (max-width: 760px) {
+    .call-transport-row { align-items: stretch; flex-direction: column; }
+    .call-transport-switch { min-width: 0; width: 100%; }
+}
 .assignment-head { padding: 22px; display: flex; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--border); }
 .assignment-head h3 { margin: 0 0 7px; font-size: 20px; }
 .assignment-head p { margin: 0; color: var(--muted); font-size: 13px; }
