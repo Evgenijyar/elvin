@@ -12,5 +12,7 @@
   timeline in both the Docker console and the UI.
 - Added an isolated Asterisk dialplan context that starts playback only after
   the outbound subscriber channel has answered.
+- Test audio is exposed to Asterisk through a dedicated read-only media path;
+  the wider Elvin data directory keeps its restrictive permissions.
 - Deployment installs and validates only the new context; the production
   `from-lptracker -> elvin-ai -> chan_websocket` route is unchanged.

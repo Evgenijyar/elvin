@@ -19,6 +19,6 @@ def test_telephony_test_page_is_isolated_and_visible_in_navigation() -> None:
     assert 'api("/api/telephony-test/calls"' in js
     assert "/api/telephony-test/calls/${state.telephonyTestId}" in js
     assert "[elvin-telephony-test]" in dialplan
-    assert "Playback(/opt/lead-voice/data/telephony-test-audio/" in dialplan
+    assert "Playback(/var/lib/asterisk/sounds/elvin-telephony-test/" in dialplan
     assert "Dial(WebSocket" not in dialplan
     assert "Goto(elvin-ai" not in dialplan

@@ -6,6 +6,7 @@ CONFIG_DIR="${ELVIN_CONFIG_DIR:-/opt/lead-voice/config}"
 DATA_DIR="${ELVIN_DATA_DIR_HOST:-/opt/lead-voice/data}"
 LOG_DIR="${ELVIN_LOG_DIR_HOST:-/opt/lead-voice/logs}"
 RECORDINGS_DIR="${ELVIN_RECORDINGS_DIR_HOST:-/opt/lead-voice/recordings}"
+TELEPHONY_TEST_AUDIO_DIR="${ELVIN_TELEPHONY_TEST_AUDIO_DIR_HOST:-/var/lib/asterisk/sounds/elvin-telephony-test}"
 ASTERISK_CONFIG_DIR="${ELVIN_ASTERISK_CONFIG_DIR:-/etc/asterisk}"
 BRANCH="${ELVIN_GIT_BRANCH:-main}"
 NAME="${ELVIN_CONTAINER_NAME:-elvin-backend}"
@@ -174,6 +175,11 @@ done
 mkdir -p "$DATA_DIR" "$LOG_DIR" "$RECORDINGS_DIR"
 chown -R 994:986 "$DATA_DIR" "$LOG_DIR" "$RECORDINGS_DIR" 2>/dev/null || true
 
+# Share only the isolated test-audio directory with Asterisk. The wider Elvin
+# data tree intentionally remains non-traversable by the Asterisk account.
+asterisk_group="$(id -g asterisk)"
+install -d -o 994 -g "$asterisk_group" -m 0750 "$TELEPHONY_TEST_AUDIO_DIR"
+
 BASE_ARGS=(
   --log-driver local
   --log-opt max-size=50m
@@ -187,6 +193,7 @@ BASE_ARGS=(
   -e ELVIN_RECORDINGS_ENABLED=false
   -e ELVIN_FRAME_TRACE_ENABLED=false
   -v "$DATA_DIR:/opt/lead-voice/data"
+  -v "$TELEPHONY_TEST_AUDIO_DIR:/opt/lead-voice/data/telephony-test-audio"
   -v "$LOG_DIR:/opt/lead-voice/logs"
   -v "$RECORDINGS_DIR:/opt/lead-voice/recordings"
 )
